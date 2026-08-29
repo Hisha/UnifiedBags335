@@ -392,7 +392,7 @@ end
 function UB:RefreshBagSlots(display)
     if not display or not display.bagSlotsFrame then return end
     local s = Settings()
-    local show = display.key == "bags" and s.showBagSlots or s.showBankBagSlots
+    local show = ((display.key == "bags") and s.showBagSlots) or ((display.key == "bank") and s.showBankBagSlots)
     if display.key == "bank" and display.view == "reagents" then show = false end
     if not show then display.bagSlotsFrame:Hide(); return end
     display.bagSlotsFrame:Show()
@@ -651,7 +651,7 @@ function UB:ApplyDisplayGeometry(display)
     local rows = math.floor(s.visibleRows or DEFAULTS.visibleRows)
     local contentWidth = columns * (BUTTON_SIZE + BUTTON_GAP) - BUTTON_GAP
     local topSpace = display.hasTabs and 82 or 60
-    local showSlots = display.key == "bags" and s.showBagSlots or s.showBankBagSlots
+    local showSlots = ((display.key == "bags") and s.showBagSlots) or ((display.key == "bank") and s.showBankBagSlots)
     if display.key == "bank" and display.view == "reagents" then showSlots = false end
     local bottomSpace = showSlots and 58 or 22
     local width = contentWidth + 55
