@@ -445,7 +445,7 @@ function UB:LayoutItems(items)
         local b = self:GetButton(i)
         shown = i
         b:ClearAllPoints()
-        local col = math.mod(i - 1, COLUMNS)
+        local col = (i - 1) % COLUMNS
         local row = math.floor((i - 1) / COLUMNS)
         b:SetPoint("TOPLEFT", self.scrollChild, "TOPLEFT", col * (BUTTON_SIZE + BUTTON_GAP), -row * (BUTTON_SIZE + BUTTON_GAP))
 
