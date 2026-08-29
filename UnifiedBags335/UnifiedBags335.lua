@@ -7,29 +7,22 @@ local BAG_COUNT = NUM_BAG_SLOTS or 4
 local BANK_BAG_COUNT = NUM_BANKBAGSLOTS or 7
 local BUTTON_SIZE = 36
 local BUTTON_GAP = 5
-local COLUMNS = 11
 local GRID_LEFT = 18
-local GRID_TOP = -82
-local SCROLL_WIDTH = COLUMNS * (BUTTON_SIZE + BUTTON_GAP) - BUTTON_GAP
 
 UB.bankOpen = false
-UB.view = "bags"
-UB.buttons = {}
-UB.visibleItems = {}
-UB.searchText = ""
-UB.hooksInstalled = false
 UB.reagentAPI = nil
 UB.refreshPending = false
 UB.bankShowPending = false
+UB.hooksInstalled = false
+UB.displays = {}
+UB.searchText = { bags = "", bank = "" }
 
-local function Print(msg)
-    DEFAULT_CHAT_FRAME:AddMessage("|cff66ccffUnifiedBags335:|r " .. tostring(msg))
-end
-
-local function ItemIDFromLink(link)
-    if not link then return nil end
-    return tonumber(string.match(link, "item:(%d+)"))
-end
+local DEFAULTS = {
+    bagColumns = 10,
+    bankColumns = 11,
+    visibleRows = 9,
+    scale = 1.0,
+}
 
 local function CharacterKey()
     return UnitName("player") or "Unknown"
@@ -44,6 +37,11 @@ local function EnsureDB()
     if type(UnifiedBags335DB.realms) ~= "table" then UnifiedBags335DB.realms = {} end
     if type(UnifiedBags335DB.settings) ~= "table" then UnifiedBags335DB.settings = {} end
 
+    local s = UnifiedBags335DB.settings
+    for k, v in pairs(DEFAULTS) do
+        if s[k] == nil then s[k] = v end
+    end
+
     local realm = RealmKey()
     if type(UnifiedBags335DB.realms[realm]) ~= "table" then UnifiedBags335DB.realms[realm] = {} end
     local name = CharacterKey()
@@ -51,6 +49,16 @@ local function EnsureDB()
         UnifiedBags335DB.realms[realm][name] = { bags = {}, bank = {}, reagents = {}, bankSeen = false }
     end
     return UnifiedBags335DB.realms[realm][name]
+end
+
+local function Settings()
+    EnsureDB()
+    return UnifiedBags335DB.settings
+end
+
+local function ItemIDFromLink(link)
+    if not link then return nil end
+    return tonumber(string.match(link, "item:(%d+)"))
 end
 
 local function AddCount(tbl, itemID, amount)
@@ -87,8 +95,7 @@ function UB:GetBankIDs()
 end
 
 function UB:CacheBags()
-    local char = EnsureDB()
-    char.bags = ScanContainers(self:GetBagIDs())
+    EnsureDB().bags = ScanContainers(self:GetBagIDs())
 end
 
 function UB:CacheBank()
@@ -113,8 +120,7 @@ function UB:AddAccountCounts(tooltip, itemID)
     local realm = UnifiedBags335DB.realms[RealmKey()]
     if not realm then return end
 
-    local rows = {}
-    local grandTotal = 0
+    local rows, grandTotal = {}, 0
     for name, data in pairs(realm) do
         local bags = data.bags and (data.bags[itemID] or 0) or 0
         local bank = data.bank and (data.bank[itemID] or 0) or 0
@@ -131,12 +137,12 @@ function UB:AddAccountCounts(tooltip, itemID)
     tooltip:AddLine(" ")
     tooltip:AddLine("Account inventory", 0.4, 0.8, 1.0)
     for _, row in ipairs(rows) do
+        local parts = {}
+        if row.bags > 0 then table.insert(parts, "bags " .. row.bags) end
+        if row.bank > 0 then table.insert(parts, "bank " .. row.bank) end
+        if row.reagents > 0 then table.insert(parts, "reagents " .. row.reagents) end
         local detail = tostring(row.total)
-        if row.bank > 0 or row.reagents > 0 then
-            local parts = {}
-            if row.bags > 0 then table.insert(parts, "bags " .. row.bags) end
-            if row.bank > 0 then table.insert(parts, "bank " .. row.bank) end
-            if row.reagents > 0 then table.insert(parts, "reagents " .. row.reagents) end
+        if #parts > 1 or row.bank > 0 or row.reagents > 0 then
             detail = detail .. "  (" .. table.concat(parts, ", ") .. ")"
         end
         tooltip:AddDoubleLine(row.name, detail, 1, 1, 1, 0.8, 0.8, 0.8)
@@ -145,6 +151,59 @@ function UB:AddAccountCounts(tooltip, itemID)
         tooltip:AddDoubleLine("Total", tostring(grandTotal), 1, 0.82, 0, 1, 0.82, 0)
     end
     tooltip:Show()
+end
+
+local function MatchesSearch(searchText, itemID, link)
+    if not searchText or searchText == "" then return true end
+    local name, _, _, _, _, itemType, subType = GetItemInfo(itemID)
+    local haystack = string.lower((name or "") .. " " .. (itemType or "") .. " " .. (subType or ""))
+    return string.find(haystack, searchText, 1, true) ~= nil
+end
+
+function UB:BuildContainerItems(ids, searchText)
+    local items = {}
+    local searching = searchText ~= ""
+    for _, bag in ipairs(ids) do
+        local slots = GetContainerNumSlots(bag) or 0
+        for slot = 1, slots do
+            local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
+            local link = GetContainerItemLink(bag, slot)
+            local itemID = ItemIDFromLink(link)
+            if itemID then
+                if MatchesSearch(searchText, itemID, link) then
+                    table.insert(items, {
+                        kind = "container", bag = bag, slot = slot, itemID = itemID,
+                        link = link, texture = texture, count = count or 1,
+                        locked = locked, quality = quality
+                    })
+                end
+            elseif not searching then
+                table.insert(items, { kind = "empty", bag = bag, slot = slot })
+            end
+        end
+    end
+    return items
+end
+
+function UB:BuildReagentItems(searchText)
+    local items = {}
+    if not self.reagentAPI or not self.reagentAPI.GetVirtualItems then return items end
+    for itemID, amount in pairs(self.reagentAPI:GetVirtualItems() or {}) do
+        itemID, amount = tonumber(itemID), tonumber(amount)
+        if itemID and amount and amount > 0 and MatchesSearch(searchText, itemID, nil) then
+            local name, link, _, _, _, _, _, _, _, texture = GetItemInfo(itemID)
+            table.insert(items, {
+                kind = "reagent", itemID = itemID, link = link, texture = texture,
+                count = amount, name = name or ("Item " .. itemID)
+            })
+        end
+    end
+    table.sort(items, function(a, b)
+        local an, bn = string.lower(a.name or ""), string.lower(b.name or "")
+        if an == bn then return a.itemID < b.itemID end
+        return an < bn
+    end)
+    return items
 end
 
 local function CursorInside(frame)
@@ -174,107 +233,15 @@ end
 
 function UB:CompleteVirtualDrag()
     local itemID, amount = self.dragItemID, self.dragAmount
-    local dropOK = self.view == "bags" and CursorInside(self.frame)
+    local dropOK = self.bagDisplay and CursorInside(self.bagDisplay.frame)
     self:CancelVirtualDrag()
     if dropOK and itemID and amount and self.reagentAPI then
         self.reagentAPI:RequestWithdraw(itemID, amount)
     end
 end
 
-function UB:CreateFrame()
-    if self.frame then return end
-
-    local f = CreateFrame("Frame", "UnifiedBags335Frame", UIParent)
-    self.frame = f
-    f:SetWidth(535)
-    f:SetHeight(485)
-    f:SetPoint("CENTER", UIParent, "CENTER", 150, 20)
-    f:SetFrameStrata("HIGH")
-    f:SetMovable(true)
-    f:EnableMouse(true)
-    f:RegisterForDrag("LeftButton")
-    f:SetScript("OnDragStart", function(frame)
-        if not UB.dragItemID then frame:StartMoving() end
-    end)
-    f:SetScript("OnDragStop", function(frame)
-        frame:StopMovingOrSizing()
-        local point, _, relativePoint, x, y = frame:GetPoint(1)
-        UnifiedBags335DB.settings.point = { point, relativePoint, x, y }
-    end)
-    f:SetBackdrop({
-        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
-        tile = true, tileSize = 32, edgeSize = 32,
-        insets = { left = 10, right = 10, top = 10, bottom = 10 }
-    })
-    f:Hide()
-    table.insert(UISpecialFrames, "UnifiedBags335Frame")
-
-    local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    self.title = title
-    title:SetPoint("TOPLEFT", 20, -17)
-    title:SetText("Bags")
-
-    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
-    close:SetPoint("TOPRIGHT", -5, -5)
-    close:SetScript("OnClick", function()
-        if UB.bankOpen and CloseBankFrame then
-            CloseBankFrame()
-        else
-            UB:Hide()
-        end
-    end)
-
-    local function MakeTab(text, view, x)
-        local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
-        b:SetWidth(112)
-        b:SetHeight(22)
-        b:SetPoint("TOPLEFT", x, -45)
-        b:SetText(text)
-        b:SetScript("OnClick", function() UB:SetView(view) end)
-        return b
-    end
-    self.bagTab = MakeTab("Bags", "bags", 18)
-    self.bankTab = MakeTab("Bank", "bank", 134)
-    self.reagentTab = MakeTab("Reagent Storage", "reagents", 250)
-    self.reagentTab:SetWidth(145)
-
-    local search = CreateFrame("EditBox", "UnifiedBags335SearchBox", f, "InputBoxTemplate")
-    self.search = search
-    search:SetAutoFocus(false)
-    search:SetWidth(112)
-    search:SetHeight(20)
-    search:SetPoint("TOPRIGHT", -34, -46)
-    search:SetMaxLetters(40)
-    search:SetScript("OnTextChanged", function(box)
-        UB.searchText = string.lower(box:GetText() or "")
-        UB:Refresh()
-    end)
-    search:SetScript("OnEscapePressed", function(box) box:ClearFocus() end)
-    search:SetScript("OnEnterPressed", function(box) box:ClearFocus() end)
-
-    local searchLabel = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    searchLabel:SetPoint("RIGHT", search, "LEFT", -5, 0)
-    searchLabel:SetText("Search")
-
-    local scroll = CreateFrame("ScrollFrame", "UnifiedBags335ScrollFrame", f, "UIPanelScrollFrameTemplate")
-    self.scroll = scroll
-    scroll:SetPoint("TOPLEFT", GRID_LEFT, GRID_TOP)
-    scroll:SetPoint("BOTTOMRIGHT", -35, 20)
-
-    local child = CreateFrame("Frame", "UnifiedBags335ScrollChild", scroll)
-    self.scrollChild = child
-    child:SetWidth(SCROLL_WIDTH)
-    child:SetHeight(1)
-    scroll:SetScrollChild(child)
-
-    scroll:EnableMouseWheel(true)
-    scroll:SetScript("OnMouseWheel", function(frame, delta)
-        local current = frame:GetVerticalScroll() or 0
-        local maxScroll = math.max(0, child:GetHeight() - frame:GetHeight())
-        frame:SetVerticalScroll(math.max(0, math.min(maxScroll, current - delta * 42)))
-    end)
-
+function UB:CreateDragLayer()
+    if self.dragIcon then return end
     local dragIcon = CreateFrame("Frame", nil, UIParent)
     self.dragIcon = dragIcon
     dragIcon:SetWidth(34); dragIcon:SetHeight(34)
@@ -297,26 +264,25 @@ function UB:CreateFrame()
     capture:Hide()
     capture:SetScript("OnMouseUp", function() UB:CompleteVirtualDrag() end)
     capture:SetScript("OnHide", function() if UB.dragIcon then UB.dragIcon:Hide() end end)
-
-    if UnifiedBags335DB.settings.point then
-        local p = UnifiedBags335DB.settings.point
-        f:ClearAllPoints()
-        f:SetPoint(p[1] or "CENTER", UIParent, p[2] or "CENTER", p[3] or 0, p[4] or 0)
-    end
 end
 
-function UB:GetButton(index)
-    local b = self.buttons[index]
+local function SavePosition(display)
+    local point, _, relativePoint, x, y = display.frame:GetPoint(1)
+    local s = Settings()
+    s[display.positionKey] = { point, relativePoint, x, y }
+end
+
+function UB:GetButton(display, index)
+    local b = display.buttons[index]
     if b then return b end
 
-    local name = "UnifiedBags335Item" .. index
-    b = CreateFrame("Button", name, self.scrollChild, "ItemButtonTemplate")
-    self.buttons[index] = b
+    local name = "UnifiedBags335_" .. display.key .. "Item" .. index
+    b = CreateFrame("Button", name, display.scrollChild, "ItemButtonTemplate")
+    display.buttons[index] = b
     b:SetWidth(BUTTON_SIZE); b:SetHeight(BUTTON_SIZE)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     b:RegisterForDrag("LeftButton")
     b.icon = _G[name .. "IconTexture"]
-    b.countText = _G[name .. "Count"]
 
     b.empty = b:CreateTexture(nil, "BACKGROUND")
     b.empty:SetAllPoints(b)
@@ -350,7 +316,9 @@ function UB:GetButton(index)
             maxStack = tonumber(maxStack) or 1
             local stackAmount = math.max(1, math.min(stored, maxStack))
             if IsShiftKeyDown() then
-                if stored > 1 then StackSplitFrame_OpenStackSplitFrame(stackAmount, button, "TOPLEFT", "BOTTOMLEFT") end
+                if stored > 1 then
+                    StackSplitFrame_OpenStackSplitFrame(stored, button, "TOPLEFT", "BOTTOMLEFT")
+                end
             elseif mouseButton == "RightButton" and UB.reagentAPI then
                 UB.reagentAPI:RequestWithdraw(button.itemID, stackAmount)
             end
@@ -386,68 +354,161 @@ function UB:GetButton(index)
     end)
 
     b:SetScript("OnReceiveDrag", function(button)
-        if button.kind ~= "reagent" and button.bag and button.slot then PickupContainerItem(button.bag, button.slot) end
+        if button.kind ~= "reagent" and button.bag and button.slot then
+            PickupContainerItem(button.bag, button.slot)
+        end
     end)
 
     return b
 end
 
-local function MatchesSearch(searchText, itemID, link)
-    if not searchText or searchText == "" then return true end
-    if link and string.find(string.lower(link), searchText, 1, true) then return true end
-    local name, _, _, _, _, itemType, subType = GetItemInfo(itemID)
-    local haystack = string.lower((name or "") .. " " .. (itemType or "") .. " " .. (subType or ""))
-    return string.find(haystack, searchText, 1, true) ~= nil
-end
-
-function UB:BuildContainerItems(ids)
-    local items = {}
-    local searching = self.searchText ~= ""
-    for _, bag in ipairs(ids) do
-        local slots = GetContainerNumSlots(bag) or 0
-        for slot = 1, slots do
-            local texture, count, locked, quality = GetContainerItemInfo(bag, slot)
-            local link = GetContainerItemLink(bag, slot)
-            local itemID = ItemIDFromLink(link)
-            if itemID then
-                if MatchesSearch(self.searchText, itemID, link) then
-                    table.insert(items, { kind = "container", bag = bag, slot = slot, itemID = itemID, link = link, texture = texture, count = count or 1, locked = locked, quality = quality })
-                end
-            elseif not searching then
-                table.insert(items, { kind = "empty", bag = bag, slot = slot })
-            end
-        end
-    end
-    return items
-end
-
-function UB:BuildReagentItems()
-    local items = {}
-    if not self.reagentAPI or not self.reagentAPI.GetVirtualItems then return items end
-    for itemID, amount in pairs(self.reagentAPI:GetVirtualItems() or {}) do
-        itemID, amount = tonumber(itemID), tonumber(amount)
-        if itemID and amount and amount > 0 and MatchesSearch(self.searchText, itemID, nil) then
-            local name, link, _, _, _, _, _, _, _, texture = GetItemInfo(itemID)
-            table.insert(items, { kind = "reagent", itemID = itemID, link = link, texture = texture, count = amount, name = name or ("Item " .. itemID) })
-        end
-    end
-    table.sort(items, function(a, b)
-        local an, bn = string.lower(a.name or ""), string.lower(b.name or "")
-        if an == bn then return a.itemID < b.itemID end
-        return an < bn
+local function CreateSearch(display, topOffset)
+    local search = CreateFrame("EditBox", nil, display.frame, "InputBoxTemplate")
+    display.search = search
+    search:SetAutoFocus(false)
+    search:SetWidth(120)
+    search:SetHeight(20)
+    search:SetPoint("TOPRIGHT", -36, topOffset)
+    search:SetMaxLetters(40)
+    search:SetScript("OnTextChanged", function(box)
+        UB.searchText[display.key] = string.lower(box:GetText() or "")
+        UB:RefreshDisplay(display)
     end)
-    return items
+    search:SetScript("OnEscapePressed", function(box) box:ClearFocus() end)
+    search:SetScript("OnEnterPressed", function(box) box:ClearFocus() end)
+
+    local label = display.frame:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    label:SetPoint("RIGHT", search, "LEFT", -5, 0)
+    label:SetText("Search")
 end
 
-function UB:LayoutItems(items)
+function UB:CreateDisplay(key, title, positionKey, hasTabs)
+    local display = { key = key, titleBase = title, positionKey = positionKey, hasTabs = hasTabs, buttons = {}, view = key }
+    self.displays[key] = display
+
+    local frameName = key == "bags" and "UnifiedBags335BagsFrame" or "UnifiedBags335BankFrame"
+    local f = CreateFrame("Frame", frameName, UIParent)
+    display.frame = f
+    f:SetFrameStrata("HIGH")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(frame) if not UB.dragItemID then frame:StartMoving() end end)
+    f:SetScript("OnDragStop", function(frame) frame:StopMovingOrSizing(); SavePosition(display) end)
+    f:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 10, right = 10, top = 10, bottom = 10 }
+    })
+    f:Hide()
+    table.insert(UISpecialFrames, frameName)
+
+    local titleText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    display.title = titleText
+    titleText:SetPoint("TOPLEFT", 20, -17)
+    titleText:SetText(CharacterKey() .. " - " .. title)
+
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -5, -5)
+    close:SetScript("OnClick", function()
+        if display.key == "bank" and UB.bankOpen and CloseBankFrame then
+            CloseBankFrame()
+        else
+            display.frame:Hide()
+        end
+    end)
+
+    local options = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    options:SetWidth(22); options:SetHeight(20)
+    options:SetPoint("TOPRIGHT", -34, -8)
+    options:SetText("+")
+    options:SetScript("OnClick", function() UB:OpenOptions() end)
+
+    local gridTop
+    if hasTabs then
+        local function MakeTab(text, view, x, width)
+            local b = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+            b:SetWidth(width); b:SetHeight(22)
+            b:SetPoint("TOPLEFT", x, -43)
+            b:SetText(text)
+            b:SetScript("OnClick", function() UB:SetBankView(view) end)
+            return b
+        end
+        display.bankTab = MakeTab("Bank", "bank", 18, 105)
+        display.reagentTab = MakeTab("Reagent Storage", "reagents", 128, 145)
+        CreateSearch(display, -44)
+        gridTop = -72
+    else
+        CreateSearch(display, -18)
+        gridTop = -50
+    end
+    display.gridTop = gridTop
+
+    local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+    display.scroll = scroll
+    scroll:SetPoint("TOPLEFT", GRID_LEFT, gridTop)
+    scroll:SetPoint("BOTTOMRIGHT", -35, 18)
+
+    local child = CreateFrame("Frame", nil, scroll)
+    display.scrollChild = child
+    child:SetHeight(1)
+    scroll:SetScrollChild(child)
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(sf, delta)
+        local current = sf:GetVerticalScroll() or 0
+        local maxScroll = math.max(0, child:GetHeight() - sf:GetHeight())
+        sf:SetVerticalScroll(math.max(0, math.min(maxScroll, current - delta * 42)))
+    end)
+
+    local pos = Settings()[positionKey]
+    if pos then
+        f:SetPoint(pos[1] or "CENTER", UIParent, pos[2] or "CENTER", pos[3] or 0, pos[4] or 0)
+    elseif key == "bags" then
+        f:SetPoint("CENTER", UIParent, "CENTER", -285, 20)
+    else
+        f:SetPoint("CENTER", UIParent, "CENTER", 285, 20)
+    end
+
+    return display
+end
+
+function UB:GetColumns(display)
+    local s = Settings()
+    if display.key == "bags" then return math.floor(s.bagColumns or DEFAULTS.bagColumns) end
+    return math.floor(s.bankColumns or DEFAULTS.bankColumns)
+end
+
+function UB:ApplyDisplayGeometry(display)
+    local s = Settings()
+    local columns = self:GetColumns(display)
+    local rows = math.floor(s.visibleRows or DEFAULTS.visibleRows)
+    local contentWidth = columns * (BUTTON_SIZE + BUTTON_GAP) - BUTTON_GAP
+    local topSpace = display.hasTabs and 82 or 60
+    local width = contentWidth + 55
+    local height = topSpace + rows * (BUTTON_SIZE + BUTTON_GAP) + 22
+    display.frame:SetWidth(width)
+    display.frame:SetHeight(height)
+    display.frame:SetScale(s.scale or 1)
+    display.scrollChild:SetWidth(contentWidth)
+end
+
+function UB:ApplyGeometry()
+    if self.bagDisplay then self:ApplyDisplayGeometry(self.bagDisplay) end
+    if self.bankDisplay then self:ApplyDisplayGeometry(self.bankDisplay) end
+    self:QueueRefresh()
+end
+
+function UB:LayoutItems(display, items)
+    local columns = self:GetColumns(display)
     local shown = 0
     for i, data in ipairs(items) do
-        local b = self:GetButton(i)
+        local b = self:GetButton(display, i)
         shown = i
         b:ClearAllPoints()
-        local col = (i - 1) % COLUMNS
-        local row = math.floor((i - 1) / COLUMNS)
-        b:SetPoint("TOPLEFT", self.scrollChild, "TOPLEFT", col * (BUTTON_SIZE + BUTTON_GAP), -row * (BUTTON_SIZE + BUTTON_GAP))
+        local col = (i - 1) % columns
+        local row = math.floor((i - 1) / columns)
+        b:SetPoint("TOPLEFT", display.scrollChild, "TOPLEFT", col * (BUTTON_SIZE + BUTTON_GAP), -row * (BUTTON_SIZE + BUTTON_GAP))
 
         b.kind = data.kind
         b.bag = data.bag
@@ -461,90 +522,156 @@ function UB:LayoutItems(items)
             b.empty:Hide()
             b.icon:SetTexture(data.texture)
             b.icon:Show()
-            if data.count and data.count > 1 then b.countText:SetText(data.count) else b.countText:SetText("") end
+            SetItemButtonCount(b, data.count or 1)
             if data.locked then SetItemButtonDesaturated(b, 1, 0.5, 0.5, 0.5) else SetItemButtonDesaturated(b, nil) end
         else
             b.icon:SetTexture(nil)
             b.icon:Hide()
-            b.countText:SetText("")
+            SetItemButtonCount(b, 0)
             b.empty:Show()
             SetItemButtonDesaturated(b, nil)
         end
         b:Show()
     end
 
-    for i = shown + 1, #self.buttons do self.buttons[i]:Hide() end
+    for i = shown + 1, #display.buttons do display.buttons[i]:Hide() end
 
-    local rows = math.max(1, math.ceil(math.max(1, #items) / COLUMNS))
-    self.scrollChild:SetHeight(rows * (BUTTON_SIZE + BUTTON_GAP))
-    local maxScroll = math.max(0, self.scrollChild:GetHeight() - self.scroll:GetHeight())
-    if self.scroll:GetVerticalScroll() > maxScroll then self.scroll:SetVerticalScroll(maxScroll) end
+    local rows = math.max(1, math.ceil(math.max(1, #items) / columns))
+    display.scrollChild:SetHeight(rows * (BUTTON_SIZE + BUTTON_GAP))
+    local maxScroll = math.max(0, display.scrollChild:GetHeight() - display.scroll:GetHeight())
+    if display.scroll:GetVerticalScroll() > maxScroll then display.scroll:SetVerticalScroll(maxScroll) end
 end
 
-function UB:UpdateTabs()
-    if self.bankOpen then self.bankTab:Enable() else self.bankTab:Disable() end
-    if self.bankOpen and self.reagentAPI and self.reagentAPI.IsServerAvailable and self.reagentAPI:IsServerAvailable() then
-        self.reagentTab:Enable()
+function UB:RefreshDisplay(display)
+    if not display or not display.frame:IsShown() then return end
+    local items
+    if display.key == "bags" then
+        display.title:SetText(CharacterKey() .. " - Bags")
+        items = self:BuildContainerItems(self:GetBagIDs(), self.searchText.bags or "")
     else
-        self.reagentTab:Disable()
+        if display.view == "reagents" then
+            display.title:SetText(CharacterKey() .. " - Reagent Storage")
+            items = self:BuildReagentItems(self.searchText.bank or "")
+        else
+            display.title:SetText(CharacterKey() .. " - Bank")
+            items = self:BuildContainerItems(self:GetBankIDs(), self.searchText.bank or "")
+        end
+        if display.reagentTab then
+            if self.bankOpen and self.reagentAPI and self.reagentAPI.IsServerAvailable and self.reagentAPI:IsServerAvailable() then
+                display.reagentTab:Enable()
+            else
+                display.reagentTab:Disable()
+            end
+        end
     end
+    self:LayoutItems(display, items)
 end
 
 function UB:Refresh()
-    if not self.frame or not self.frame:IsShown() then return end
-    self:UpdateTabs()
-
-    local items
-    if self.view == "bank" then
-        if not self.bankOpen then self.view = "bags" end
-    elseif self.view == "reagents" then
-        if not self.bankOpen or not self.reagentAPI then self.view = "bags" end
-    end
-
-    if self.view == "bank" then
-        self.title:SetText(CharacterKey() .. " - Bank")
-        items = self:BuildContainerItems(self:GetBankIDs())
-    elseif self.view == "reagents" then
-        self.title:SetText(CharacterKey() .. " - Reagent Storage")
-        items = self:BuildReagentItems()
-    else
-        self.title:SetText(CharacterKey() .. " - Bags")
-        items = self:BuildContainerItems(self:GetBagIDs())
-    end
-    self:LayoutItems(items)
+    self:RefreshDisplay(self.bagDisplay)
+    self:RefreshDisplay(self.bankDisplay)
 end
 
 function UB:QueueRefresh()
     self.refreshPending = true
 end
 
-function UB:SetView(view)
-    if view == "bank" and not self.bankOpen then return end
-    if view == "reagents" and (not self.bankOpen or not self.reagentAPI) then return end
-    self.view = view
-    self.scroll:SetVerticalScroll(0)
-    self:Refresh()
+function UB:SetBankView(view)
+    if not self.bankOpen or not self.bankDisplay then return end
+    if view == "reagents" and not self.reagentAPI then return end
+    self.bankDisplay.view = view
+    self.bankDisplay.scroll:SetVerticalScroll(0)
+    self:RefreshDisplay(self.bankDisplay)
 end
 
-function UB:Show(view)
-    self:CreateFrame()
-    if view then self.view = view end
-    self.frame:Show()
-    self:Refresh()
-end
-
-function UB:Hide()
-    self:CancelVirtualDrag()
-    if self.frame then self.frame:Hide() end
+function UB:ShowBags()
+    self.bagDisplay.frame:Show()
+    self:RefreshDisplay(self.bagDisplay)
 end
 
 function UB:ToggleBags()
-    self:CreateFrame()
-    if self.frame:IsShown() and self.view == "bags" and not self.bankOpen then
-        self:Hide()
-    else
-        self:Show("bags")
+    if self.bagDisplay.frame:IsShown() then self.bagDisplay.frame:Hide() else self:ShowBags() end
+end
+
+function UB:ShowBank()
+    if not self.bankOpen then return end
+    self.bankDisplay.frame:Show()
+    self:RefreshDisplay(self.bankDisplay)
+end
+
+function UB:CreateOptions()
+    if self.optionsPanel then return end
+    local panel = CreateFrame("Frame", "UnifiedBags335OptionsPanel", InterfaceOptionsFramePanelContainer)
+    self.optionsPanel = panel
+    panel.name = "UnifiedBags335"
+
+    local title = panel:CreateFontString(nil, "ARTWORK", "GameFontNormalLarge")
+    title:SetPoint("TOPLEFT", 16, -16)
+    title:SetText("UnifiedBags335")
+
+    local sub = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    sub:SetPoint("TOPLEFT", title, "BOTTOMLEFT", 0, -8)
+    sub:SetText("Layout settings are applied immediately.")
+
+    local function MakeSlider(name, label, minv, maxv, step, y, setting)
+        local slider = CreateFrame("Slider", name, panel, "OptionsSliderTemplate")
+        slider:SetPoint("TOPLEFT", 24, y)
+        slider:SetWidth(260)
+        slider:SetMinMaxValues(minv, maxv)
+        slider:SetValueStep(step)
+        slider:SetValue(Settings()[setting])
+        _G[name .. "Low"]:SetText(tostring(minv))
+        _G[name .. "High"]:SetText(tostring(maxv))
+        _G[name .. "Text"]:SetText(label .. ": " .. tostring(Settings()[setting]))
+        slider:SetScript("OnValueChanged", function(self, value)
+            if step >= 1 then value = math.floor(value + 0.5) else value = math.floor(value * 100 + 0.5) / 100 end
+            Settings()[setting] = value
+            _G[name .. "Text"]:SetText(label .. ": " .. tostring(value))
+            UB:ApplyGeometry()
+        end)
+        return slider
     end
+
+    MakeSlider("UnifiedBags335BagColumnsSlider", "Bag columns", 6, 16, 1, -82, "bagColumns")
+    MakeSlider("UnifiedBags335BankColumnsSlider", "Bank/Reagent columns", 6, 16, 1, -142, "bankColumns")
+    MakeSlider("UnifiedBags335RowsSlider", "Visible rows", 4, 14, 1, -202, "visibleRows")
+    MakeSlider("UnifiedBags335ScaleSlider", "Window scale", 0.70, 1.30, 0.05, -262, "scale")
+
+    local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
+    reset:SetWidth(120); reset:SetHeight(24)
+    reset:SetPoint("TOPLEFT", 24, -325)
+    reset:SetText("Reset Layout")
+    reset:SetScript("OnClick", function()
+        local s = Settings()
+        for k, v in pairs(DEFAULTS) do s[k] = v end
+        s.bagPoint = nil
+        s.bankPoint = nil
+        UB.bagDisplay.frame:ClearAllPoints()
+        UB.bagDisplay.frame:SetPoint("CENTER", UIParent, "CENTER", -285, 20)
+        UB.bankDisplay.frame:ClearAllPoints()
+        UB.bankDisplay.frame:SetPoint("CENTER", UIParent, "CENTER", 285, 20)
+        UB:ApplyGeometry()
+        InterfaceOptionsFrame_OpenToCategory(panel)
+    end)
+
+    InterfaceOptions_AddCategory(panel)
+end
+
+function UB:OpenOptions()
+    self:CreateOptions()
+    InterfaceOptionsFrame_OpenToCategory(self.optionsPanel)
+    InterfaceOptionsFrame_OpenToCategory(self.optionsPanel)
+end
+
+function UB:CreateFrames()
+    if self.bagDisplay then return end
+    EnsureDB()
+    self:CreateDragLayer()
+    self.bagDisplay = self:CreateDisplay("bags", "Bags", "bagPoint", false)
+    self.bankDisplay = self:CreateDisplay("bank", "Bank", "bankPoint", true)
+    self.bankDisplay.view = "bank"
+    self:ApplyGeometry()
+    self:CreateOptions()
 end
 
 function UB:AttachReagentAPI()
@@ -563,36 +690,27 @@ function UB:InstallHooks()
     if self.hooksInstalled then return end
     self.hooksInstalled = true
 
-    self.originalToggleBackpack = ToggleBackpack
-    self.originalOpenBackpack = OpenBackpack
-    self.originalCloseBackpack = CloseBackpack
-    self.originalToggleBag = ToggleBag
-    self.originalOpenAllBags = OpenAllBags
-    self.originalCloseAllBags = CloseAllBags
-
     ToggleBackpack = function() UB:ToggleBags() end
-    OpenBackpack = function() UB:Show("bags") end
-    CloseBackpack = function()
-        if not UB.bankOpen then UB:Hide() end
-    end
-    ToggleBag = function(bagSlot)
-        if bagSlot and bagSlot > BAG_COUNT and UB.bankOpen then UB:Show("bank") else UB:ToggleBags() end
-    end
-    OpenAllBags = function(force)
-        if UB.bankOpen then
-            UB:Show(UB.view == "reagents" and "reagents" or "bank")
-        elseif force then UB:Show("bags") else UB:ToggleBags() end
-    end
-    CloseAllBags = function()
-        if not UB.bankOpen then UB:Hide() end
-    end
+    OpenBackpack = function() UB:ShowBags() end
+    CloseBackpack = function() if not UB.bankOpen then UB.bagDisplay.frame:Hide() end end
+    ToggleBag = function() UB:ToggleBags() end
+    OpenAllBags = function() UB:ShowBags() end
+    CloseAllBags = function() if not UB.bankOpen then UB.bagDisplay.frame:Hide() end end
 
-    -- We replace Blizzard's bank frame, but the normal client/server banker
-    -- session is untouched.  BANKFRAME_OPENED/CLOSED still drive our UI.
     if BankFrame then
         BankFrame:UnregisterEvent("BANKFRAME_OPENED")
         BankFrame:UnregisterEvent("BANKFRAME_CLOSED")
         BankFrame:Hide()
+    end
+end
+
+SLASH_UNIFIEDBAGS3351 = "/ubags"
+SlashCmdList.UNIFIEDBAGS335 = function(msg)
+    msg = string.lower(msg or "")
+    if msg == "options" or msg == "config" or msg == "" then
+        UB:OpenOptions()
+    elseif msg == "bags" then
+        UB:ToggleBags()
     end
 end
 
@@ -605,13 +723,12 @@ UB:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 UB:RegisterEvent("PLAYERBANKBAGSLOTS_CHANGED")
 UB:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 UB:RegisterEvent("ADDON_LOADED")
+
 UB:SetScript("OnUpdate", function(self)
-    -- One-frame scheduler shared by ordinary inventory refreshes and banker
-    -- opening.  Keeping one scheduler prevents simultaneous BRG sync/BAG_UPDATE
-    -- events from replacing each other's OnUpdate handlers.
     if self.bankShowPending then
         self.bankShowPending = false
-        self:Show("bank")
+        self:ShowBags()
+        self:ShowBank()
         self.refreshPending = false
         return
     end
@@ -623,8 +740,7 @@ end)
 
 UB:SetScript("OnEvent", function(self, event, ...)
     if event == "PLAYER_LOGIN" then
-        EnsureDB()
-        self:CreateFrame()
+        self:CreateFrames()
         self:AttachReagentAPI()
         self:InstallHooks()
         self:CacheBags()
@@ -651,8 +767,6 @@ UB:SetScript("OnEvent", function(self, event, ...)
         self:CacheBags()
         self:CacheBank()
         if self.reagentAPI and self.reagentAPI.RequestSync then self.reagentAPI:RequestSync() end
-        -- Defer one frame so any stock OpenAllBags call generated by the bank
-        -- interaction cannot switch the initial view away from Bank.
         self.bankShowPending = true
         return
     end
@@ -660,8 +774,8 @@ UB:SetScript("OnEvent", function(self, event, ...)
     if event == "BANKFRAME_CLOSED" then
         self:CacheBank()
         self.bankOpen = false
-        if self.view == "bank" or self.view == "reagents" then self:Hide() end
-        self:UpdateTabs()
+        self.bankDisplay.frame:Hide()
+        self.bankDisplay.view = "bank"
         return
     end
 

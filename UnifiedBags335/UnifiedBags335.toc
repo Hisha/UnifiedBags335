@@ -1,8 +1,8 @@
 ## Interface: 30300
 ## Title: UnifiedBags335
-## Notes: Single-window bags and bank with optional BankReagents virtual reagent storage
+## Notes: Unified bags and bank with optional virtual Reagent Storage support
 ## Author: Hisha / ChatGPT
-## Version: 0.1.0
+## Version: 0.1.3
 ## SavedVariables: UnifiedBags335DB
 ## OptionalDeps: BankReagentsUI
 UnifiedBags335.lua
