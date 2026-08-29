@@ -22,6 +22,8 @@ local DEFAULTS = {
     bankColumns = 11,
     visibleRows = 9,
     scale = 1.0,
+    showBagSlots = true,
+    showBankBagSlots = true,
 }
 
 local function CharacterKey()
@@ -308,7 +310,15 @@ function UB:GetButton(display, index)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     b:SetScript("OnClick", function(button, mouseButton)
-        if not button.itemID then return end
+        -- Empty real bag/bank slots are valid drop targets.  The old early
+        -- return meant an item could be picked up with left-click but could
+        -- never be placed into an empty destination slot.
+        if not button.itemID then
+            if button.kind == "empty" and mouseButton == "LeftButton" and button.bag and button.slot then
+                PickupContainerItem(button.bag, button.slot)
+            end
+            return
+        end
 
         if button.kind == "reagent" then
             local stored = UB.reagentAPI and UB.reagentAPI:GetStored(button.itemID) or button.count or 0
@@ -360,6 +370,152 @@ function UB:GetButton(display, index)
     end)
 
     return b
+end
+
+
+local function SetCheckText(check, text)
+    local fs = _G[check:GetName() .. "Text"]
+    if fs then fs:SetText(text) end
+end
+
+function UB:UpdateMoney()
+    if self.bagDisplay and self.bagDisplay.money then
+        local money = GetMoney() or 0
+        if GetCoinTextureString then
+            self.bagDisplay.money:SetText(GetCoinTextureString(money))
+        else
+            self.bagDisplay.money:SetText(tostring(money))
+        end
+    end
+end
+
+function UB:RefreshBagSlots(display)
+    if not display or not display.bagSlotsFrame then return end
+    local s = Settings()
+    local show = display.key == "bags" and s.showBagSlots or s.showBankBagSlots
+    if display.key == "bank" and display.view == "reagents" then show = false end
+    if not show then display.bagSlotsFrame:Hide(); return end
+    display.bagSlotsFrame:Show()
+
+    local firstBag = display.key == "bags" and 1 or (BAG_COUNT + 1)
+    local count = display.key == "bags" and BAG_COUNT or BANK_BAG_COUNT
+    local purchased = display.key == "bank" and (GetNumBankSlots() or 0) or count
+
+    for i = 1, count do
+        local button = display.bagSlotButtons[i]
+        local bag = firstBag + i - 1
+        local invSlot = ContainerIDToInventoryID and ContainerIDToInventoryID(bag) or nil
+        button.bagID = bag
+        button.invSlot = invSlot
+        button.purchased = display.key == "bags" or i <= purchased
+        local texture = invSlot and GetInventoryItemTexture("player", invSlot) or nil
+        button.icon:SetTexture(texture or "Interface\\PaperDoll\\UI-PaperDoll-Slot-Bag")
+        button.icon:SetVertexColor(button.purchased and 1 or 0.45, button.purchased and 1 or 0.45, button.purchased and 1 or 0.45)
+        button:Show()
+    end
+end
+
+function UB:CreateBagSlotStrip(display)
+    local strip = CreateFrame("Frame", nil, display.frame)
+    display.bagSlotsFrame = strip
+    display.bagSlotButtons = {}
+    strip:SetHeight(38)
+    strip:SetPoint("BOTTOMRIGHT", -24, 14)
+
+    local count = display.key == "bags" and BAG_COUNT or BANK_BAG_COUNT
+    strip:SetWidth(count * 34)
+    for i = 1, count do
+        local b = CreateFrame("Button", nil, strip)
+        display.bagSlotButtons[i] = b
+        b:SetWidth(30); b:SetHeight(30)
+        b:SetPoint("LEFT", (i - 1) * 34, 0)
+        b.icon = b:CreateTexture(nil, "ARTWORK")
+        b.icon:SetAllPoints(b)
+        b.border = b:CreateTexture(nil, "OVERLAY")
+        b.border:SetTexture("Interface\\Buttons\\UI-Quickslot2")
+        b.border:SetPoint("TOPLEFT", -1, 1); b.border:SetPoint("BOTTOMRIGHT", 1, -1)
+        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        b:SetScript("OnClick", function(button, mouseButton)
+            if display.key == "bank" and not button.purchased then
+                UB:ShowBankBagPurchaseDialog()
+                return
+            end
+            if mouseButton ~= "LeftButton" or not button.invSlot then return end
+            if CursorHasItem and CursorHasItem() then
+                if PutItemInBag then PutItemInBag(button.invSlot) end
+            elseif PickupBagFromSlot then
+                PickupBagFromSlot(button.invSlot)
+            end
+        end)
+        b:SetScript("OnEnter", function(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            if not button.purchased then
+                GameTooltip:SetText(BANK_BAG_PURCHASE or "Bank bag slot not purchased", 1, 1, 1)
+                GameTooltip:AddLine("Left- or right-click to purchase the next bank bag slot.", 0.8, 0.8, 0.8)
+                if GetBankSlotCost and SetTooltipMoney then
+                    SetTooltipMoney(GameTooltip, GetBankSlotCost(GetNumBankSlots() or 0))
+                end
+            elseif button.invSlot and GetInventoryItemLink("player", button.invSlot) then
+                GameTooltip:SetInventoryItem("player", button.invSlot)
+            else
+                GameTooltip:SetText(display.key == "bags" and "Empty bag slot" or "Empty bank bag slot")
+                GameTooltip:AddLine("Left-click with a bag on the cursor to equip it.", 0.8, 0.8, 0.8)
+            end
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+end
+
+function UB:ShowBankBagPurchaseDialog()
+    if not self.bankOpen then return end
+    if not PurchaseSlot or not GetBankSlotCost then return end
+    if (GetNumBankSlots() or 0) >= BANK_BAG_COUNT then return end
+
+    local dialogName = "CONFIRM_BUY_BANK_SLOT_UNIFIEDBAGS335"
+    if not StaticPopupDialogs[dialogName] then
+        StaticPopupDialogs[dialogName] = {
+            text = CONFIRM_BUY_BANK_SLOT or "Purchase another bank bag slot?",
+            button1 = YES,
+            button2 = NO,
+            OnAccept = function()
+                PurchaseSlot()
+            end,
+            OnShow = function(frame)
+                if frame and frame.GetName and MoneyFrame_Update then
+                    MoneyFrame_Update(frame:GetName() .. "MoneyFrame", GetBankSlotCost(GetNumBankSlots() or 0))
+                end
+            end,
+            hasMoneyFrame = 1,
+            timeout = 0,
+            hideOnEscape = 1,
+        }
+    end
+    StaticPopup_Show(dialogName)
+end
+
+function UB:UpdateAutoDepositControl()
+    local check = self.optionsAutoDeposit
+    if not check then return end
+
+    local apiAvailable = self.reagentAPI and self.reagentAPI.IsServerAvailable and self.reagentAPI:IsServerAvailable()
+    if self.reagentAPI and self.reagentAPI.GetAutoDepositEnabled then
+        check:SetChecked(self.reagentAPI:GetAutoDepositEnabled() and 1 or nil)
+    else
+        check:SetChecked(nil)
+    end
+
+    if apiAvailable and self.bankOpen then
+        check:Enable()
+        if self.optionsAutoDepositNote then
+            self.optionsAutoDepositNote:SetText("Automatically deposits eligible reagents when you use a banker.")
+        end
+    else
+        check:Disable()
+        if self.optionsAutoDepositNote then
+            self.optionsAutoDepositNote:SetText("Visit a banker to change this setting.")
+        end
+    end
 end
 
 local function CreateSearch(display, topOffset)
@@ -461,6 +617,16 @@ function UB:CreateDisplay(key, title, positionKey, hasTabs)
         sf:SetVerticalScroll(math.max(0, math.min(maxScroll, current - delta * 42)))
     end)
 
+
+    if key == "bags" then
+        local money = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        display.money = money
+        money:SetPoint("BOTTOMLEFT", 20, 21)
+        money:SetJustifyH("LEFT")
+    end
+
+    self:CreateBagSlotStrip(display)
+
     local pos = Settings()[positionKey]
     if pos then
         f:SetPoint(pos[1] or "CENTER", UIParent, pos[2] or "CENTER", pos[3] or 0, pos[4] or 0)
@@ -485,12 +651,19 @@ function UB:ApplyDisplayGeometry(display)
     local rows = math.floor(s.visibleRows or DEFAULTS.visibleRows)
     local contentWidth = columns * (BUTTON_SIZE + BUTTON_GAP) - BUTTON_GAP
     local topSpace = display.hasTabs and 82 or 60
+    local showSlots = display.key == "bags" and s.showBagSlots or s.showBankBagSlots
+    if display.key == "bank" and display.view == "reagents" then showSlots = false end
+    local bottomSpace = showSlots and 58 or 22
     local width = contentWidth + 55
-    local height = topSpace + rows * (BUTTON_SIZE + BUTTON_GAP) + 22
+    if display.hasTabs then width = math.max(width, 575) end
+    local height = topSpace + rows * (BUTTON_SIZE + BUTTON_GAP) + bottomSpace
     display.frame:SetWidth(width)
     display.frame:SetHeight(height)
     display.frame:SetScale(s.scale or 1)
+    display.scroll:SetPoint("BOTTOMRIGHT", -35, showSlots and 54 or 18)
     display.scrollChild:SetWidth(contentWidth)
+    self:RefreshBagSlots(display)
+    self:UpdateMoney()
 end
 
 function UB:ApplyGeometry()
@@ -564,6 +737,8 @@ function UB:RefreshDisplay(display)
             end
         end
     end
+    self:RefreshBagSlots(display)
+    if display.key == "bank" then self:UpdateAutoDepositControl() end
     self:LayoutItems(display, items)
 end
 
@@ -581,6 +756,7 @@ function UB:SetBankView(view)
     if view == "reagents" and not self.reagentAPI then return end
     self.bankDisplay.view = view
     self.bankDisplay.scroll:SetVerticalScroll(0)
+    self:ApplyDisplayGeometry(self.bankDisplay)
     self:RefreshDisplay(self.bankDisplay)
 end
 
@@ -637,9 +813,42 @@ function UB:CreateOptions()
     MakeSlider("UnifiedBags335RowsSlider", "Visible rows", 4, 14, 1, -202, "visibleRows")
     MakeSlider("UnifiedBags335ScaleSlider", "Window scale", 0.70, 1.30, 0.05, -262, "scale")
 
+
+    local function MakeCheck(name, label, y, setting)
+        local check = CreateFrame("CheckButton", name, panel, "UICheckButtonTemplate")
+        check:SetPoint("TOPLEFT", 24, y)
+        check:SetChecked(Settings()[setting] and 1 or nil)
+        SetCheckText(check, label)
+        check:SetScript("OnClick", function(self)
+            Settings()[setting] = self:GetChecked() and true or false
+            UB:ApplyGeometry()
+        end)
+        return check
+    end
+
+    MakeCheck("UnifiedBags335ShowBagSlotsCheck", "Show equipped bag slots on Bags", -315, "showBagSlots")
+    MakeCheck("UnifiedBags335ShowBankBagSlotsCheck", "Show bank bag slots on Bank", -350, "showBankBagSlots")
+
+    local auto = CreateFrame("CheckButton", "UnifiedBags335OptionsAutoDepositCheck", panel, "UICheckButtonTemplate")
+    self.optionsAutoDeposit = auto
+    auto:SetPoint("TOPLEFT", 24, -385)
+    SetCheckText(auto, "Auto-deposit reagents")
+    auto:SetScript("OnClick", function(check)
+        if UB.reagentAPI and UB.reagentAPI.SetAutoDepositEnabled then
+            UB.reagentAPI:SetAutoDepositEnabled(check:GetChecked() and true or false)
+        end
+    end)
+
+    local autoNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
+    self.optionsAutoDepositNote = autoNote
+    autoNote:SetPoint("TOPLEFT", 48, -414)
+    autoNote:SetWidth(360)
+    autoNote:SetJustifyH("LEFT")
+    autoNote:SetText("Visit a banker to change this setting.")
+
     local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     reset:SetWidth(120); reset:SetHeight(24)
-    reset:SetPoint("TOPLEFT", 24, -325)
+    reset:SetPoint("TOPLEFT", 24, -455)
     reset:SetText("Reset Layout")
     reset:SetScript("OnClick", function()
         local s = Settings()
@@ -655,6 +864,7 @@ function UB:CreateOptions()
     end)
 
     InterfaceOptions_AddCategory(panel)
+    self:UpdateAutoDepositControl()
 end
 
 function UB:OpenOptions()
@@ -683,6 +893,13 @@ function UB:AttachReagentAPI()
         owner:CacheReagents()
         owner:QueueRefresh()
     end)
+    if api.RegisterAutoDepositCallback then
+        api:RegisterAutoDepositCallback(self, function(owner)
+            owner:UpdateAutoDepositControl()
+            owner:CacheReagents()
+            owner:QueueRefresh()
+        end)
+    end
     self:CacheReagents()
 end
 
@@ -717,6 +934,8 @@ end
 UB:RegisterEvent("PLAYER_LOGIN")
 UB:RegisterEvent("PLAYER_LOGOUT")
 UB:RegisterEvent("BAG_UPDATE")
+UB:RegisterEvent("PLAYER_MONEY")
+UB:RegisterEvent("UNIT_INVENTORY_CHANGED")
 UB:RegisterEvent("BANKFRAME_OPENED")
 UB:RegisterEvent("BANKFRAME_CLOSED")
 UB:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
@@ -767,6 +986,7 @@ UB:SetScript("OnEvent", function(self, event, ...)
         self:CacheBags()
         self:CacheBank()
         if self.reagentAPI and self.reagentAPI.RequestSync then self.reagentAPI:RequestSync() end
+        if self.reagentAPI and self.reagentAPI.RequestAutoDepositState then self.reagentAPI:RequestAutoDepositState() end
         self.bankShowPending = true
         return
     end
@@ -776,6 +996,18 @@ UB:SetScript("OnEvent", function(self, event, ...)
         self.bankOpen = false
         self.bankDisplay.frame:Hide()
         self.bankDisplay.view = "bank"
+        return
+    end
+
+    if event == "PLAYER_MONEY" then
+        self:UpdateMoney()
+        return
+    end
+
+    if event == "UNIT_INVENTORY_CHANGED" then
+        self:RefreshBagSlots(self.bagDisplay)
+        if self.bankOpen then self:RefreshBagSlots(self.bankDisplay) end
+        self:QueueRefresh()
         return
     end
 
