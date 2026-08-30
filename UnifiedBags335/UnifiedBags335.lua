@@ -308,13 +308,14 @@ local function SavePosition(display)
     s[display.positionKey] = { point, relativePoint, x, y }
 end
 
-function UB:GetButton(display, index)
-    local b = display.buttons[index]
+function UB:GetCustomButton(display, index)
+    display.customButtons = display.customButtons or {}
+    local b = display.customButtons[index]
     if b then return b end
 
-    local name = "UnifiedBags335_" .. display.key .. "Item" .. index
+    local name = "UnifiedBags335_" .. display.key .. "CustomItem" .. index
     b = CreateFrame("Button", name, display.scrollChild, "ItemButtonTemplate")
-    display.buttons[index] = b
+    display.customButtons[index] = b
     b:SetWidth(BUTTON_SIZE); b:SetHeight(BUTTON_SIZE)
     b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
     b:RegisterForDrag("LeftButton")
@@ -448,26 +449,15 @@ function UB:GetButton(display, index)
         end
 
         if mouseButton == "RightButton" then
-            if ContainerFrameItemButton_OnClick then
-                    -- Use Blizzard's own container click path for ordinary
-                    -- usable items (recipes, consumables, equipment, etc.).
-                    local oldID = button:GetID()
-                    local parent = button:GetParent()
-                    local oldParentID = parent:GetID()
-
-                    -- Blizzard 3.3.5 resolves a container item as:
-                    --   bag  = button:GetParent():GetID()
-                    --   slot = button:GetID()
-                    -- Our unified buttons do not live inside one frame per bag,
-                    -- so temporarily present that exact stock identity.
-                    button:SetID(button.slot)
-                    parent:SetID(button.bag)
-                    ContainerFrameItemButton_OnClick(button, "RightButton")
-                    parent:SetID(oldParentID)
-                    button:SetID(oldID)
-                else
-                    UseContainerItem(button.bag, button.slot)
-                end
+            -- In banker/guild-bank/vendor contexts we need the stock
+            -- context-sensitive UseContainerItem behavior (move/sell).
+            -- Ordinary world use/equip/learn actions are performed by the
+            -- button's SecureActionButtonTemplate action instead, so addon
+            -- Lua never directly initiates a protected recipe/spell action.
+            if UB.bankOpen or UB.guildBankOpen or (MerchantFrame and MerchantFrame:IsShown()) then
+                UseContainerItem(button.bag, button.slot)
+            end
+            return
         else
             PickupContainerItem(button.bag, button.slot)
         end
@@ -495,6 +485,93 @@ function UB:GetButton(display, index)
         end
     end)
 
+    return b
+end
+
+
+
+function UB:GetContainerParent(display, bag)
+    display.containerParents = display.containerParents or {}
+    local parent = display.containerParents[bag]
+    if parent then return parent end
+
+    parent = CreateFrame("Frame", nil, display.scrollChild)
+    parent:SetID(bag)
+    parent:SetAllPoints(display.scrollChild)
+    display.containerParents[bag] = parent
+    return parent
+end
+
+function UB:GetContainerButton(display, index, bag)
+    display.containerButtons = display.containerButtons or {}
+    local b = display.containerButtons[index]
+    local parent = self:GetContainerParent(display, bag)
+
+    if not b then
+        local name = "UnifiedBags335_" .. display.key .. "ContainerItem" .. index
+        b = CreateFrame("Button", name, parent, "ContainerFrameItemButtonTemplate")
+        display.containerButtons[index] = b
+        b:SetWidth(BUTTON_SIZE)
+        b:SetHeight(BUTTON_SIZE)
+        -- UnifiedBags' layout code expects every item button to expose the
+        -- standard icon texture through b.icon.  ContainerFrameItemButtonTemplate
+        -- creates the texture, but does not populate this custom field for us.
+        b.icon = _G[name .. "IconTexture"]
+
+        -- Important: do not replace the inherited Blizzard OnClick script.
+        -- Bagnon keeps this exact path so the physical mouse click enters
+        -- Blizzard's container handler directly without addon Lua initiating
+        -- protected use/equip/learn actions.
+        b.empty = b:CreateTexture(nil, "BACKGROUND")
+        b.empty:SetAllPoints(b)
+        b.empty:SetTexture("Interface\\Buttons\\UI-EmptySlot")
+        b.empty:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+
+        local function UpdateContainerTooltip(button)
+            if not button.itemID then return end
+
+            if button:GetRight() and button:GetRight() >= (GetScreenWidth() / 2) then
+                GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+            else
+                GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            end
+
+            if button.bag == BANK and GameTooltip.SetInventoryItem then
+                local inventorySlot = BankButtonIDToInvSlotID and BankButtonIDToInvSlotID(button.slot)
+                if inventorySlot then
+                    GameTooltip:SetInventoryItem("player", inventorySlot)
+                elseif button.link then
+                    GameTooltip:SetHyperlink(button.link)
+                end
+            elseif GameTooltip.SetBagItem then
+                GameTooltip:SetBagItem(button.bag, button.slot)
+            elseif button.link then
+                GameTooltip:SetHyperlink(button.link)
+            end
+
+            UB:AddAccountCounts(GameTooltip, button.itemID)
+
+            if IsModifiedClick("COMPAREITEMS") and GameTooltip_ShowCompareItem then
+                GameTooltip_ShowCompareItem(GameTooltip, true)
+            elseif GameTooltip.shoppingTooltips then
+                for _, tooltip in pairs(GameTooltip.shoppingTooltips) do
+                    tooltip:Hide()
+                end
+                GameTooltip.comparing = false
+            end
+        end
+
+        b.UpdateTooltip = UpdateContainerTooltip
+        b:SetScript("OnEnter", UpdateContainerTooltip)
+        b:SetScript("OnLeave", function()
+            GameTooltip:Hide()
+            if ResetCursor then ResetCursor() end
+        end)
+    end
+
+    if b:GetParent() ~= parent then
+        b:SetParent(parent)
+    end
     return b
 end
 
@@ -804,7 +881,19 @@ function UB:LayoutItems(display, items)
     local columns = self:GetColumns(display)
     local shown = 0
     for i, data in ipairs(items) do
-        local b = self:GetButton(display, i)
+        local isContainer = data.kind == "container" or data.kind == "empty"
+        local b
+        if isContainer then
+            b = self:GetContainerButton(display, i, data.bag)
+            if display.customButtons and display.customButtons[i] then
+                display.customButtons[i]:Hide()
+            end
+        else
+            b = self:GetCustomButton(display, i)
+            if display.containerButtons and display.containerButtons[i] then
+                display.containerButtons[i]:Hide()
+            end
+        end
         shown = i
         b:ClearAllPoints()
         local col = (i - 1) % columns
@@ -819,6 +908,13 @@ function UB:LayoutItems(display, items)
         b.link = data.link
         b.texture = data.texture
         b.count = data.count or 0
+
+        if isContainer then
+            local parent = self:GetContainerParent(display, data.bag)
+            if b:GetParent() ~= parent then b:SetParent(parent) end
+            parent:SetID(data.bag)
+            b:SetID(data.slot)
+        end
 
         if data.itemID then
             b.empty:Hide()
@@ -836,7 +932,16 @@ function UB:LayoutItems(display, items)
         b:Show()
     end
 
-    for i = shown + 1, #display.buttons do display.buttons[i]:Hide() end
+    if display.containerButtons then
+        for i = shown + 1, #display.containerButtons do
+            display.containerButtons[i]:Hide()
+        end
+    end
+    if display.customButtons then
+        for i = shown + 1, #display.customButtons do
+            display.customButtons[i]:Hide()
+        end
+    end
 
     local rows = math.max(1, math.ceil(math.max(1, #items) / columns))
     display.scrollChild:SetHeight(rows * (BUTTON_SIZE + BUTTON_GAP))
@@ -1519,6 +1624,8 @@ UB:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 UB:RegisterEvent("PLAYERBANKBAGSLOTS_CHANGED")
 UB:RegisterEvent("GET_ITEM_INFO_RECEIVED")
 UB:RegisterEvent("ADDON_LOADED")
+UB:RegisterEvent("MERCHANT_SHOW")
+UB:RegisterEvent("MERCHANT_CLOSED")
 
 UB:SetScript("OnUpdate", function(self)
     if self.bankShowPending then
@@ -1603,6 +1710,11 @@ UB:SetScript("OnEvent", function(self, event, ...)
             self:UpdateGuildMoney()
             self:RefreshGuildTabs()
         end
+        return
+    end
+
+    if event == "MERCHANT_SHOW" or event == "MERCHANT_CLOSED" then
+        self:QueueRefresh()
         return
     end
 
