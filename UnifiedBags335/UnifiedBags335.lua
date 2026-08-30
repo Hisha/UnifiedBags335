@@ -10,16 +10,18 @@ local BUTTON_GAP = 5
 local GRID_LEFT = 18
 
 UB.bankOpen = false
+UB.guildBankOpen = false
 UB.reagentAPI = nil
 UB.refreshPending = false
 UB.bankShowPending = false
 UB.hooksInstalled = false
 UB.displays = {}
-UB.searchText = { bags = "", bank = "" }
+UB.searchText = { bags = "", bank = "", guild = "" }
 
 local DEFAULTS = {
     bagColumns = 10,
     bankColumns = 11,
+    guildColumns = 14,
     visibleRows = 9,
     scale = 1.0,
     showBagSlots = true,
@@ -208,6 +210,38 @@ function UB:BuildReagentItems(searchText)
     return items
 end
 
+
+function UB:BuildGuildItems(searchText)
+    local items = {}
+    if not self.guildBankOpen then return items end
+
+    local tab = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    if not tab or tab < 1 or tab > numTabs then return items end
+
+    local _, _, isViewable = GetGuildBankTabInfo(tab)
+    if not isViewable then return items end
+
+    local searching = searchText ~= ""
+    local maxSlots = MAX_GUILDBANK_SLOTS_PER_TAB or 98
+    for slot = 1, maxSlots do
+        local texture, count, locked = GetGuildBankItemInfo(tab, slot)
+        local link = GetGuildBankItemLink(tab, slot)
+        local itemID = ItemIDFromLink(link)
+        if itemID then
+            if MatchesSearch(searchText, itemID, link) then
+                table.insert(items, {
+                    kind = "guild", tab = tab, slot = slot, itemID = itemID,
+                    link = link, texture = texture, count = count or 1, locked = locked
+                })
+            end
+        elseif not searching then
+            table.insert(items, { kind = "guildempty", tab = tab, slot = slot })
+        end
+    end
+    return items
+end
+
 local function CursorInside(frame)
     if not frame or not frame:IsShown() then return false end
     local scale = frame:GetEffectiveScale() or 1
@@ -296,6 +330,8 @@ function UB:GetButton(display, index)
         if amount <= 0 then return end
         if button.kind == "reagent" then
             if UB.reagentAPI then UB.reagentAPI:RequestWithdraw(button.itemID, amount) end
+        elseif button.kind == "guild" and button.tab and button.slot then
+            SplitGuildBankItem(button.tab, button.slot, amount)
         elseif button.bag and button.slot then
             SplitContainerItem(button.bag, button.slot, amount)
         end
@@ -304,7 +340,13 @@ function UB:GetButton(display, index)
     b:SetScript("OnEnter", function(button)
         if not button.itemID then return end
         GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
-        if button.link then GameTooltip:SetHyperlink(button.link) else GameTooltip:SetHyperlink("item:" .. button.itemID) end
+        if button.kind == "guild" and GameTooltip.SetGuildBankItem then
+            GameTooltip:SetGuildBankItem(button.tab, button.slot)
+        elseif button.link then
+            GameTooltip:SetHyperlink(button.link)
+        else
+            GameTooltip:SetHyperlink("item:" .. button.itemID)
+        end
         UB:AddAccountCounts(GameTooltip, button.itemID)
     end)
     b:SetScript("OnLeave", function() GameTooltip:Hide() end)
@@ -316,6 +358,26 @@ function UB:GetButton(display, index)
         if not button.itemID then
             if button.kind == "empty" and mouseButton == "LeftButton" and button.bag and button.slot then
                 PickupContainerItem(button.bag, button.slot)
+            elseif button.kind == "guildempty" and mouseButton == "LeftButton" and button.tab and button.slot then
+                PickupGuildBankItem(button.tab, button.slot)
+            end
+            return
+        end
+
+        if button.kind == "guild" then
+            if HandleModifiedItemClick and button.link and HandleModifiedItemClick(button.link) then
+                return
+            end
+            if IsModifiedClick("SPLITSTACK") then
+                if not button.locked and (button.count or 0) > 1 then
+                    OpenStackSplitFrame(button.count, button, "BOTTOMLEFT", "TOPLEFT")
+                end
+                return
+            end
+            if mouseButton == "RightButton" then
+                AutoStoreGuildBankItem(button.tab, button.slot)
+            else
+                PickupGuildBankItem(button.tab, button.slot)
             end
             return
         end
@@ -325,9 +387,9 @@ function UB:GetButton(display, index)
             local _, _, _, _, _, _, _, maxStack = GetItemInfo(button.itemID)
             maxStack = tonumber(maxStack) or 1
             local stackAmount = math.max(1, math.min(stored, maxStack))
-            if IsShiftKeyDown() then
+            if IsModifiedClick("SPLITSTACK") then
                 if stored > 1 then
-                    StackSplitFrame_OpenStackSplitFrame(stored, button, "TOPLEFT", "BOTTOMLEFT")
+                    OpenStackSplitFrame(stored, button, "BOTTOMLEFT", "TOPLEFT")
                 end
             elseif mouseButton == "RightButton" and UB.reagentAPI then
                 UB.reagentAPI:RequestWithdraw(button.itemID, stackAmount)
@@ -335,11 +397,12 @@ function UB:GetButton(display, index)
             return
         end
 
-        if IsShiftKeyDown() then
-            if ChatFrameEditBox and ChatFrameEditBox:IsVisible() and button.link then
-                ChatEdit_InsertLink(button.link)
-            elseif (button.count or 0) > 1 then
-                StackSplitFrame_OpenStackSplitFrame(button.count, button, "TOPLEFT", "BOTTOMLEFT")
+        if HandleModifiedItemClick and button.link and HandleModifiedItemClick(button.link) then
+            return
+        end
+        if IsModifiedClick("SPLITSTACK") then
+            if (button.count or 0) > 1 then
+                OpenStackSplitFrame(button.count, button, "BOTTOMLEFT", "TOPLEFT")
             end
             return
         end
@@ -353,7 +416,9 @@ function UB:GetButton(display, index)
 
     b:SetScript("OnDragStart", function(button)
         if not button.itemID then return end
-        if button.kind == "reagent" then
+        if button.kind == "guild" then
+            PickupGuildBankItem(button.tab, button.slot)
+        elseif button.kind == "reagent" then
             local stored = UB.reagentAPI and UB.reagentAPI:GetStored(button.itemID) or button.count or 0
             local _, _, _, _, _, _, _, maxStack = GetItemInfo(button.itemID)
             maxStack = tonumber(maxStack) or 1
@@ -364,7 +429,9 @@ function UB:GetButton(display, index)
     end)
 
     b:SetScript("OnReceiveDrag", function(button)
-        if button.kind ~= "reagent" and button.bag and button.slot then
+        if (button.kind == "guild" or button.kind == "guildempty") and button.tab and button.slot then
+            PickupGuildBankItem(button.tab, button.slot)
+        elseif button.kind ~= "reagent" and button.bag and button.slot then
             PickupContainerItem(button.bag, button.slot)
         end
     end)
@@ -642,6 +709,7 @@ end
 function UB:GetColumns(display)
     local s = Settings()
     if display.key == "bags" then return math.floor(s.bagColumns or DEFAULTS.bagColumns) end
+    if display.key == "guild" then return math.floor(s.guildColumns or DEFAULTS.guildColumns) end
     return math.floor(s.bankColumns or DEFAULTS.bankColumns)
 end
 
@@ -669,6 +737,7 @@ end
 function UB:ApplyGeometry()
     if self.bagDisplay then self:ApplyDisplayGeometry(self.bagDisplay) end
     if self.bankDisplay then self:ApplyDisplayGeometry(self.bankDisplay) end
+    if self.guildDisplay then self:ApplyGuildGeometry() end
     self:QueueRefresh()
 end
 
@@ -685,6 +754,7 @@ function UB:LayoutItems(display, items)
 
         b.kind = data.kind
         b.bag = data.bag
+        b.tab = data.tab
         b.slot = data.slot
         b.itemID = data.itemID
         b.link = data.link
@@ -745,6 +815,7 @@ end
 function UB:Refresh()
     self:RefreshDisplay(self.bagDisplay)
     self:RefreshDisplay(self.bankDisplay)
+    self:RefreshGuildDisplay()
 end
 
 function UB:QueueRefresh()
@@ -773,6 +844,282 @@ function UB:ShowBank()
     if not self.bankOpen then return end
     self.bankDisplay.frame:Show()
     self:RefreshDisplay(self.bankDisplay)
+end
+
+
+function UB:UpdateGuildMoney()
+    local display = self.guildDisplay
+    if not display then return end
+    local money = GetGuildBankMoney and GetGuildBankMoney() or 0
+    if display.money then
+        display.money:SetText(GetCoinTextureString and GetCoinTextureString(money) or tostring(money))
+    end
+    if display.withdrawButton then
+        if CanWithdrawGuildBankMoney and CanWithdrawGuildBankMoney() then
+            display.withdrawButton:Enable()
+        else
+            display.withdrawButton:Disable()
+        end
+    end
+end
+
+function UB:RefreshGuildTabs()
+    local display = self.guildDisplay
+    if not display then return end
+
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    local current = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+    local maxTabs = MAX_GUILDBANK_TABS or 6
+    local maxBuyTabs = MAX_BUY_GUILDBANK_TABS or maxTabs
+    local buyIndex = nil
+    if IsGuildLeader and IsGuildLeader() and numTabs < maxBuyTabs and GetGuildBankTabCost and GetGuildBankTabCost() then
+        buyIndex = numTabs + 1
+    end
+
+    for i = 1, maxTabs do
+        local b = display.guildTabs[i]
+        local name, icon, isViewable, canDeposit, numWithdrawals, remainingWithdrawals = GetGuildBankTabInfo(i)
+
+        if i <= numTabs then
+            b.isBuy = false
+            b.name = (name and name ~= "") and name or ("Tab " .. i)
+            b.isViewable = isViewable
+            b.icon:SetTexture(icon or "Interface\\PaperDoll\\UI-PaperDoll-Slot-Bag")
+            b:SetChecked(i == current)
+            if isViewable then
+                b:Enable()
+                b.icon:SetVertexColor(1, 1, 1)
+            else
+                b:Disable()
+                b.icon:SetVertexColor(0.45, 0.45, 0.45)
+            end
+            if i == current and remainingWithdrawals and remainingWithdrawals > 0 then
+                SetItemButtonCount(b, remainingWithdrawals)
+            else
+                SetItemButtonCount(b, 0)
+            end
+            b:Show()
+        elseif i == buyIndex then
+            b.isBuy = true
+            b.name = BUY_GUILDBANK_TAB or "Buy Guild Bank Tab"
+            b.isViewable = true
+            b.icon:SetTexture("Interface\\GuildBankFrame\\UI-GuildBankFrame-NewTab")
+            b.icon:SetVertexColor(1, 1, 1)
+            b:SetChecked(i == current)
+            b:Enable()
+            SetItemButtonCount(b, 0)
+            b:Show()
+        else
+            b:Hide()
+        end
+    end
+end
+
+function UB:SelectGuildTab(tab)
+    if not self.guildBankOpen then return end
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    local maxBuyTabs = MAX_BUY_GUILDBANK_TABS or (MAX_GUILDBANK_TABS or 6)
+
+    if tab == numTabs + 1 and IsGuildLeader and IsGuildLeader() and numTabs < maxBuyTabs then
+        if GetGuildBankTabCost and GetGuildBankTabCost() then
+            SetCurrentGuildBankTab(tab)
+            self:RefreshGuildTabs()
+            StaticPopup_Show("CONFIRM_BUY_GUILDBANK_TAB")
+        end
+        return
+    end
+
+    if tab < 1 or tab > numTabs then return end
+    local _, _, isViewable = GetGuildBankTabInfo(tab)
+    if not isViewable then return end
+    SetCurrentGuildBankTab(tab)
+    QueryGuildBankTab(tab)
+    self.guildDisplay.scroll:SetVerticalScroll(0)
+    self:QueueRefresh()
+end
+
+function UB:CreateGuildDisplay()
+    if self.guildDisplay then return end
+
+    local display = { key = "guild", positionKey = "guildPoint", buttons = {}, guildTabs = {} }
+    self.guildDisplay = display
+    self.displays.guild = display
+
+    local f = CreateFrame("Frame", "UnifiedBags335GuildBankFrame", UIParent)
+    display.frame = f
+    f:SetFrameStrata("HIGH")
+    f:SetMovable(true)
+    f:EnableMouse(true)
+    f:RegisterForDrag("LeftButton")
+    f:SetScript("OnDragStart", function(frame) frame:StartMoving() end)
+    f:SetScript("OnDragStop", function(frame) frame:StopMovingOrSizing(); SavePosition(display) end)
+    f:SetBackdrop({
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 32,
+        insets = { left = 10, right = 10, top = 10, bottom = 10 }
+    })
+    f:Hide()
+    table.insert(UISpecialFrames, "UnifiedBags335GuildBankFrame")
+
+    display.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    display.title:SetPoint("TOPLEFT", 20, -17)
+    display.title:SetText("Guild Bank")
+
+    local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    close:SetPoint("TOPRIGHT", -5, -5)
+    close:SetScript("OnClick", function()
+        if UB.guildBankOpen and CloseGuildBankFrame then CloseGuildBankFrame() else f:Hide() end
+    end)
+
+    local options = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    options:SetWidth(22); options:SetHeight(20)
+    options:SetPoint("TOPRIGHT", -34, -8)
+    options:SetText("+")
+    options:SetScript("OnClick", function() UB:OpenOptions() end)
+
+    CreateSearch(display, -18)
+
+    local tabStrip = CreateFrame("Frame", nil, f)
+    display.tabStrip = tabStrip
+    tabStrip:SetPoint("TOPLEFT", 18, -48)
+    tabStrip:SetWidth((MAX_GUILDBANK_TABS or 6) * 39)
+    tabStrip:SetHeight(38)
+
+    for i = 1, (MAX_GUILDBANK_TABS or 6) do
+        local name = "UnifiedBags335GuildTab" .. i
+        local b = CreateFrame("CheckButton", name, tabStrip, "ItemButtonTemplate")
+        display.guildTabs[i] = b
+        b:SetID(i)
+        b:SetWidth(34); b:SetHeight(34)
+        b:SetPoint("LEFT", (i - 1) * 39, 0)
+        b.icon = _G[name .. "IconTexture"]
+        b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
+        b:SetScript("OnClick", function(button) UB:SelectGuildTab(button:GetID()) end)
+        b:SetScript("OnEnter", function(button)
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+            if button.isBuy then
+                GameTooltip:SetText(BUY_GUILDBANK_TAB or "Buy Guild Bank Tab", 1, 1, 1)
+                if GetGuildBankTabCost and SetTooltipMoney and GetGuildBankTabCost() then
+                    SetTooltipMoney(GameTooltip, GetGuildBankTabCost())
+                end
+            else
+                local tab = button:GetID()
+                local nameText, _, isViewable, canDeposit, numWithdrawals, remainingWithdrawals = GetGuildBankTabInfo(tab)
+                GameTooltip:SetText((nameText and nameText ~= "") and nameText or ("Tab " .. tab), 1, 1, 1)
+                if not isViewable then
+                    GameTooltip:AddLine(GUILDBANK_TAB_LOCKED or "Locked", 1, 0.2, 0.2)
+                else
+                    GameTooltip:AddLine(canDeposit and "Deposit: Allowed" or "Deposit: Not allowed",
+                        canDeposit and 0.2 or 1, canDeposit and 1 or 0.2, 0.2)
+                    if remainingWithdrawals and remainingWithdrawals >= 0 then
+                        GameTooltip:AddLine("Withdrawals remaining: " .. remainingWithdrawals, 0.8, 0.8, 0.8)
+                    end
+                end
+            end
+            GameTooltip:Show()
+        end)
+        b:SetScript("OnLeave", function() GameTooltip:Hide() end)
+    end
+
+    local scroll = CreateFrame("ScrollFrame", nil, f, "UIPanelScrollFrameTemplate")
+    display.scroll = scroll
+    scroll:SetPoint("TOPLEFT", GRID_LEFT, -92)
+    scroll:SetPoint("BOTTOMRIGHT", -35, 55)
+
+    local child = CreateFrame("Frame", nil, scroll)
+    display.scrollChild = child
+    child:SetHeight(1)
+    scroll:SetScrollChild(child)
+    scroll:EnableMouseWheel(true)
+    scroll:SetScript("OnMouseWheel", function(sf, delta)
+        local current = sf:GetVerticalScroll() or 0
+        local maxScroll = math.max(0, child:GetHeight() - sf:GetHeight())
+        sf:SetVerticalScroll(math.max(0, math.min(maxScroll, current - delta * 42)))
+    end)
+
+    display.money = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    display.money:SetPoint("BOTTOMLEFT", 20, 22)
+
+    display.depositButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    display.depositButton:SetWidth(82); display.depositButton:SetHeight(22)
+    display.depositButton:SetPoint("BOTTOMRIGHT", -115, 16)
+    display.depositButton:SetText("Deposit")
+    display.depositButton:SetScript("OnClick", function()
+        StaticPopup_Hide("GUILDBANK_WITHDRAW")
+        StaticPopup_Show("GUILDBANK_DEPOSIT")
+    end)
+
+    display.withdrawButton = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+    display.withdrawButton:SetWidth(82); display.withdrawButton:SetHeight(22)
+    display.withdrawButton:SetPoint("BOTTOMRIGHT", -28, 16)
+    display.withdrawButton:SetText("Withdraw")
+    display.withdrawButton:SetScript("OnClick", function()
+        if CanWithdrawGuildBankMoney and CanWithdrawGuildBankMoney() then
+            StaticPopup_Hide("GUILDBANK_DEPOSIT")
+            StaticPopup_Show("GUILDBANK_WITHDRAW")
+        end
+    end)
+
+    local pos = Settings().guildPoint
+    if pos then
+        f:SetPoint(pos[1] or "CENTER", UIParent, pos[2] or "CENTER", pos[3] or 0, pos[4] or 0)
+    else
+        f:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+    end
+end
+
+function UB:ApplyGuildGeometry()
+    local display = self.guildDisplay
+    if not display then return end
+    local s = Settings()
+    local columns = math.floor(s.guildColumns or DEFAULTS.guildColumns)
+    local rows = math.floor(s.visibleRows or DEFAULTS.visibleRows)
+    local contentWidth = columns * (BUTTON_SIZE + BUTTON_GAP) - BUTTON_GAP
+    local width = math.max(contentWidth + 55, 575)
+    local height = 122 + rows * (BUTTON_SIZE + BUTTON_GAP) + 55
+    display.frame:SetWidth(width)
+    display.frame:SetHeight(height)
+    display.frame:SetScale(s.scale or 1)
+    display.scrollChild:SetWidth(contentWidth)
+end
+
+function UB:RefreshGuildDisplay()
+    local display = self.guildDisplay
+    if not display or not display.frame:IsShown() then return end
+    local guildName = GetGuildInfo and GetGuildInfo("player") or nil
+    local tab = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    local tabName = nil
+    if tab >= 1 and tab <= numTabs then tabName = GetGuildBankTabInfo(tab) end
+    display.title:SetText((guildName and guildName ~= "") and
+        (guildName .. " - " .. ((tabName and tabName ~= "") and tabName or "Guild Bank")) or "Guild Bank")
+    self:RefreshGuildTabs()
+    self:UpdateGuildMoney()
+    self:LayoutItems(display, self:BuildGuildItems(self.searchText.guild or ""))
+end
+
+function UB:ShowGuildBank()
+    if not self.guildBankOpen then return end
+    self:CreateGuildDisplay()
+    self:ApplyGuildGeometry()
+    self.guildDisplay.frame:Show()
+
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    local current = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+    if numTabs > 0 and (not current or current < 1 or current > numTabs + 1) then
+        for i = 1, numTabs do
+            local _, _, viewable = GetGuildBankTabInfo(i)
+            if viewable then
+                SetCurrentGuildBankTab(i)
+                QueryGuildBankTab(i)
+                break
+            end
+        end
+    elseif current and current >= 1 and current <= numTabs then
+        QueryGuildBankTab(current)
+    end
+    self:RefreshGuildDisplay()
 end
 
 function UB:CreateOptions()
@@ -810,8 +1157,9 @@ function UB:CreateOptions()
 
     MakeSlider("UnifiedBags335BagColumnsSlider", "Bag columns", 6, 16, 1, -82, "bagColumns")
     MakeSlider("UnifiedBags335BankColumnsSlider", "Bank/Reagent columns", 6, 16, 1, -142, "bankColumns")
-    MakeSlider("UnifiedBags335RowsSlider", "Visible rows", 4, 14, 1, -202, "visibleRows")
-    MakeSlider("UnifiedBags335ScaleSlider", "Window scale", 0.70, 1.30, 0.05, -262, "scale")
+    MakeSlider("UnifiedBags335GuildColumnsSlider", "Guild Bank columns", 7, 18, 1, -202, "guildColumns")
+    MakeSlider("UnifiedBags335RowsSlider", "Visible rows", 4, 14, 1, -262, "visibleRows")
+    MakeSlider("UnifiedBags335ScaleSlider", "Window scale", 0.70, 1.30, 0.05, -322, "scale")
 
 
     local function MakeCheck(name, label, y, setting)
@@ -826,12 +1174,12 @@ function UB:CreateOptions()
         return check
     end
 
-    MakeCheck("UnifiedBags335ShowBagSlotsCheck", "Show equipped bag slots on Bags", -315, "showBagSlots")
-    MakeCheck("UnifiedBags335ShowBankBagSlotsCheck", "Show bank bag slots on Bank", -350, "showBankBagSlots")
+    MakeCheck("UnifiedBags335ShowBagSlotsCheck", "Show equipped bag slots on Bags", -375, "showBagSlots")
+    MakeCheck("UnifiedBags335ShowBankBagSlotsCheck", "Show bank bag slots on Bank", -410, "showBankBagSlots")
 
     local auto = CreateFrame("CheckButton", "UnifiedBags335OptionsAutoDepositCheck", panel, "UICheckButtonTemplate")
     self.optionsAutoDeposit = auto
-    auto:SetPoint("TOPLEFT", 24, -385)
+    auto:SetPoint("TOPLEFT", 24, -445)
     SetCheckText(auto, "Auto-deposit reagents")
     auto:SetScript("OnClick", function(check)
         if UB.reagentAPI and UB.reagentAPI.SetAutoDepositEnabled then
@@ -841,24 +1189,29 @@ function UB:CreateOptions()
 
     local autoNote = panel:CreateFontString(nil, "ARTWORK", "GameFontHighlightSmall")
     self.optionsAutoDepositNote = autoNote
-    autoNote:SetPoint("TOPLEFT", 48, -414)
+    autoNote:SetPoint("TOPLEFT", 48, -474)
     autoNote:SetWidth(360)
     autoNote:SetJustifyH("LEFT")
     autoNote:SetText("Visit a banker to change this setting.")
 
     local reset = CreateFrame("Button", nil, panel, "UIPanelButtonTemplate")
     reset:SetWidth(120); reset:SetHeight(24)
-    reset:SetPoint("TOPLEFT", 24, -455)
+    reset:SetPoint("TOPLEFT", 24, -515)
     reset:SetText("Reset Layout")
     reset:SetScript("OnClick", function()
         local s = Settings()
         for k, v in pairs(DEFAULTS) do s[k] = v end
         s.bagPoint = nil
         s.bankPoint = nil
+        s.guildPoint = nil
         UB.bagDisplay.frame:ClearAllPoints()
         UB.bagDisplay.frame:SetPoint("CENTER", UIParent, "CENTER", -285, 20)
         UB.bankDisplay.frame:ClearAllPoints()
         UB.bankDisplay.frame:SetPoint("CENTER", UIParent, "CENTER", 285, 20)
+        if UB.guildDisplay then
+            UB.guildDisplay.frame:ClearAllPoints()
+            UB.guildDisplay.frame:SetPoint("CENTER", UIParent, "CENTER", 0, 20)
+        end
         UB:ApplyGeometry()
         InterfaceOptionsFrame_OpenToCategory(panel)
     end)
@@ -880,6 +1233,7 @@ function UB:CreateFrames()
     self.bagDisplay = self:CreateDisplay("bags", "Bags", "bagPoint", false)
     self.bankDisplay = self:CreateDisplay("bank", "Bank", "bankPoint", true)
     self.bankDisplay.view = "bank"
+    self:CreateGuildDisplay()
     self:ApplyGeometry()
     self:CreateOptions()
 end
@@ -919,6 +1273,10 @@ function UB:InstallHooks()
         BankFrame:UnregisterEvent("BANKFRAME_CLOSED")
         BankFrame:Hide()
     end
+
+    if GuildBankFrame_LoadUI then
+        GuildBankFrame_LoadUI = function() end
+    end
 end
 
 SLASH_UNIFIEDBAGS3351 = "/ubags"
@@ -938,6 +1296,14 @@ UB:RegisterEvent("PLAYER_MONEY")
 UB:RegisterEvent("UNIT_INVENTORY_CHANGED")
 UB:RegisterEvent("BANKFRAME_OPENED")
 UB:RegisterEvent("BANKFRAME_CLOSED")
+UB:RegisterEvent("GUILDBANKFRAME_OPENED")
+UB:RegisterEvent("GUILDBANKFRAME_CLOSED")
+UB:RegisterEvent("GUILDBANKBAGSLOTS_CHANGED")
+UB:RegisterEvent("GUILDBANK_ITEM_LOCK_CHANGED")
+UB:RegisterEvent("GUILDBANK_UPDATE_TABS")
+UB:RegisterEvent("GUILDBANK_UPDATE_MONEY")
+UB:RegisterEvent("GUILDBANK_UPDATE_WITHDRAWMONEY")
+UB:RegisterEvent("GUILD_ROSTER_UPDATE")
 UB:RegisterEvent("PLAYERBANKSLOTS_CHANGED")
 UB:RegisterEvent("PLAYERBANKBAGSLOTS_CHANGED")
 UB:RegisterEvent("GET_ITEM_INFO_RECEIVED")
@@ -999,8 +1365,42 @@ UB:SetScript("OnEvent", function(self, event, ...)
         return
     end
 
+    if event == "GUILDBANKFRAME_OPENED" then
+        self.guildBankOpen = true
+        self:ShowBags()
+        self:ShowGuildBank()
+        return
+    end
+
+    if event == "GUILDBANKFRAME_CLOSED" then
+        self.guildBankOpen = false
+        if self.guildDisplay then self.guildDisplay.frame:Hide() end
+        StaticPopup_Hide("GUILDBANK_WITHDRAW")
+        StaticPopup_Hide("GUILDBANK_DEPOSIT")
+        StaticPopup_Hide("CONFIRM_BUY_GUILDBANK_TAB")
+        return
+    end
+
+    if event == "GUILDBANKBAGSLOTS_CHANGED" or event == "GUILDBANK_ITEM_LOCK_CHANGED"
+        or event == "GUILDBANK_UPDATE_TABS" or event == "GUILD_ROSTER_UPDATE" then
+        if self.guildBankOpen then self:QueueRefresh() end
+        return
+    end
+
+    if event == "GUILDBANK_UPDATE_MONEY" or event == "GUILDBANK_UPDATE_WITHDRAWMONEY" then
+        if self.guildBankOpen then
+            self:UpdateGuildMoney()
+            self:RefreshGuildTabs()
+        end
+        return
+    end
+
     if event == "PLAYER_MONEY" then
         self:UpdateMoney()
+        if self.guildBankOpen then
+            self:UpdateGuildMoney()
+            self:RefreshGuildTabs()
+        end
         return
     end
 
