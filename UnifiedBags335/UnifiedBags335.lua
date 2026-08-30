@@ -337,19 +337,49 @@ function UB:GetButton(display, index)
         end
     end
 
-    b:SetScript("OnEnter", function(button)
+    local function UpdateItemTooltip(button)
         if not button.itemID then return end
-        GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+
+        local x = button:GetRight()
+        if x and x >= (GetScreenWidth() / 2) then
+            GameTooltip:SetOwner(button, "ANCHOR_LEFT")
+        else
+            GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
+        end
+
+        -- Use Blizzard's real container/guild-bank tooltip setters whenever
+        -- possible.  Besides showing the item, these preserve the native
+        -- comparison metadata used by the 3.3.5 shopping tooltips.
         if button.kind == "guild" and GameTooltip.SetGuildBankItem then
             GameTooltip:SetGuildBankItem(button.tab, button.slot)
+        elseif button.bag ~= nil and button.slot and GameTooltip.SetBagItem then
+            GameTooltip:SetBagItem(button.bag, button.slot)
         elseif button.link then
             GameTooltip:SetHyperlink(button.link)
         else
             GameTooltip:SetHyperlink("item:" .. button.itemID)
         end
+
         UB:AddAccountCounts(GameTooltip, button.itemID)
+
+        -- Stock GameTooltip refreshes its owner's UpdateTooltip periodically.
+        -- Re-evaluate the compare modifier here so pressing/releasing Shift
+        -- while already hovering behaves like Blizzard's container buttons.
+        if IsModifiedClick("COMPAREITEMS") and GameTooltip_ShowCompareItem then
+            GameTooltip_ShowCompareItem(GameTooltip, true)
+        elseif GameTooltip.shoppingTooltips then
+            for _, tooltip in pairs(GameTooltip.shoppingTooltips) do
+                tooltip:Hide()
+            end
+            GameTooltip.comparing = false
+        end
+    end
+
+    b.UpdateTooltip = UpdateItemTooltip
+    b:SetScript("OnEnter", UpdateItemTooltip)
+    b:SetScript("OnLeave", function()
+        GameTooltip:Hide()
     end)
-    b:SetScript("OnLeave", function() GameTooltip:Hide() end)
 
     b:SetScript("OnClick", function(button, mouseButton)
         -- Empty real bag/bank slots are valid drop targets.  The old early
