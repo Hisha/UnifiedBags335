@@ -352,6 +352,16 @@ function UB:GetButton(display, index)
         -- comparison metadata used by the 3.3.5 shopping tooltips.
         if button.kind == "guild" and GameTooltip.SetGuildBankItem then
             GameTooltip:SetGuildBankItem(button.tab, button.slot)
+        elseif button.bag == BANK and button.slot and GameTooltip.SetInventoryItem then
+            -- The 28 built-in bank slots are not a real bag for tooltip
+            -- purposes in Wrath.  Blizzard maps them back to inventory slot
+            -- IDs before asking GameTooltip for the item.
+            local inventorySlot = BankButtonIDToInvSlotID and BankButtonIDToInvSlotID(button.slot, nil)
+            if inventorySlot then
+                GameTooltip:SetInventoryItem("player", inventorySlot)
+            elseif button.link then
+                GameTooltip:SetHyperlink(button.link)
+            end
         elseif button.bag ~= nil and button.slot and GameTooltip.SetBagItem then
             GameTooltip:SetBagItem(button.bag, button.slot)
         elseif button.link then

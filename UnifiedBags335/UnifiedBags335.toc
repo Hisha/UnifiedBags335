@@ -2,7 +2,7 @@
 ## Title: UnifiedBags335
 ## Notes: Unified bags and bank with optional virtual Reagent Storage support
 ## Author: Hisha / ChatGPT
-## Version: 0.2.3
+## Version: 0.2.4
 ## SavedVariables: UnifiedBags335DB
 ## OptionalDeps: BankReagentsUI
 UnifiedBags335.lua
