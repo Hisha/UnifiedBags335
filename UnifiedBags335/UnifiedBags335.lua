@@ -915,6 +915,150 @@ function UB:RefreshGuildTabs()
     end
 end
 
+
+function UB:OpenGuildTabEdit(tab)
+    if not self.guildBankOpen then return end
+    local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
+    if not tab or tab < 1 or tab > numTabs then return end
+
+    -- The stock 3.3.5 Guild Bank UI owns the icon/name picker and commits
+    -- through SetGuildBankTabInfo(). Load it only for this management dialog.
+    if not GuildBankFrame then
+        if UIParentLoadAddOn then
+            UIParentLoadAddOn("Blizzard_GuildBankUI")
+        elseif LoadAddOn then
+            LoadAddOn("Blizzard_GuildBankUI")
+        end
+    end
+
+    local name, icon, isViewable = GetGuildBankTabInfo(tab)
+    if not isViewable then return end
+
+    -- Different 3.3.5 UI distributions expose the dialog entry point under
+    -- slightly different global helpers. Prefer the stock helper when present.
+    if GuildBankPopupFrame and GuildBankPopupFrame.Show then
+        GuildBankPopupFrame.tab = tab
+        GuildBankPopupFrame:Show()
+        if GuildBankPopupFrame_Update then
+            GuildBankPopupFrame_Update(tab)
+        end
+        return
+    end
+
+    if GuildBankFrameTab_OnClick and GuildBankFrame then
+        -- Fall back to the stock tab handler with modified-click semantics.
+        local button = _G["GuildBankTab" .. tab]
+        if button then
+            GuildBankFrameTab_OnClick(button, "RightButton")
+            return
+        end
+    end
+
+    -- Last-resort lightweight native-style editor if this client build does
+    -- not expose the stock popup globals after loading Blizzard_GuildBankUI.
+    if not self.guildTabEditFrame then
+        local f = CreateFrame("Frame", "UnifiedBags335GuildTabEditFrame", UIParent)
+        self.guildTabEditFrame = f
+        f:SetWidth(360); f:SetHeight(300)
+        f:SetPoint("CENTER")
+        f:SetFrameStrata("DIALOG")
+        f:SetBackdrop({
+            bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+            edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+            tile = true, tileSize = 32, edgeSize = 32,
+            insets = { left = 10, right = 10, top = 10, bottom = 10 }
+        })
+        f:Hide()
+
+        local title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+        title:SetPoint("TOP", 0, -18)
+        title:SetText("Guild Bank Tab")
+
+        local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        label:SetPoint("TOPLEFT", 22, -52)
+        label:SetText("Tab name:")
+
+        local edit = CreateFrame("EditBox", nil, f, "InputBoxTemplate")
+        f.nameEdit = edit
+        edit:SetAutoFocus(false)
+        edit:SetWidth(245); edit:SetHeight(24)
+        edit:SetPoint("LEFT", label, "RIGHT", 10, 0)
+
+        local iconLabel = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+        iconLabel:SetPoint("TOPLEFT", 22, -90)
+        iconLabel:SetText("Icon:")
+
+        f.iconButtons = {}
+        local iconChoices = {
+            "INV_Misc_QuestionMark",
+            "INV_Misc_Bag_10",
+            "INV_Misc_Coin_01",
+            "INV_Ingot_02",
+            "INV_Fabric_Silk_02",
+            "INV_Misc_Herb_19",
+            "INV_Misc_Gem_01",
+            "INV_Potion_54",
+            "INV_Weapon_ShortBlade_05",
+            "INV_Chest_Plate03",
+            "INV_Helmet_08",
+            "INV_Misc_Food_15",
+        }
+
+        for i, tex in ipairs(iconChoices) do
+            local b = CreateFrame("CheckButton", nil, f, "ItemButtonTemplate")
+            f.iconButtons[i] = b
+            b:SetWidth(36); b:SetHeight(36)
+            local col = (i - 1) % 6
+            local row = math.floor((i - 1) / 6)
+            b:SetPoint("TOPLEFT", 55 + col * 46, -110 - row * 46)
+            local iconTex = _G[b:GetName() and (b:GetName() .. "IconTexture") or ""]
+            if not iconTex then
+                iconTex = b:CreateTexture(nil, "ARTWORK")
+                iconTex:SetAllPoints()
+            end
+            b.iconTexture = iconTex
+            iconTex:SetTexture("Interface\\Icons\\" .. tex)
+            b.iconPath = "Interface\\Icons\\" .. tex
+            b:SetScript("OnClick", function(btn)
+                f.selectedIcon = btn.iconPath
+                for _, other in ipairs(f.iconButtons) do other:SetChecked(other == btn) end
+            end)
+        end
+
+        local ok = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        ok:SetWidth(90); ok:SetHeight(24)
+        ok:SetPoint("BOTTOMRIGHT", -108, 18)
+        ok:SetText(OKAY)
+        ok:SetScript("OnClick", function()
+            local tabIndex = f.tab
+            if tabIndex and SetGuildBankTabInfo then
+                local newName = f.nameEdit:GetText() or ""
+                local iconPath = f.selectedIcon
+                if newName ~= "" and iconPath then
+                    SetGuildBankTabInfo(tabIndex, newName, iconPath)
+                end
+            end
+            f:Hide()
+        end)
+
+        local cancel = CreateFrame("Button", nil, f, "UIPanelButtonTemplate")
+        cancel:SetWidth(90); cancel:SetHeight(24)
+        cancel:SetPoint("BOTTOMRIGHT", -14, 18)
+        cancel:SetText(CANCEL)
+        cancel:SetScript("OnClick", function() f:Hide() end)
+    end
+
+    local f = self.guildTabEditFrame
+    f.tab = tab
+    f.nameEdit:SetText(name or ("Tab " .. tab))
+    f.nameEdit:HighlightText(0, 0)
+    f.selectedIcon = icon or "Interface\\Icons\\INV_Misc_QuestionMark"
+    for _, b in ipairs(f.iconButtons) do
+        b:SetChecked(b.iconPath == f.selectedIcon)
+    end
+    f:Show()
+end
+
 function UB:SelectGuildTab(tab)
     if not self.guildBankOpen then return end
     local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
@@ -995,7 +1139,14 @@ function UB:CreateGuildDisplay()
         b:SetPoint("LEFT", (i - 1) * 39, 0)
         b.icon = _G[name .. "IconTexture"]
         b:RegisterForClicks("LeftButtonUp", "RightButtonUp")
-        b:SetScript("OnClick", function(button) UB:SelectGuildTab(button:GetID()) end)
+        b:SetScript("OnClick", function(button, mouseButton)
+            local tab = button:GetID()
+            if mouseButton == "RightButton" and not button.isBuy then
+                UB:OpenGuildTabEdit(tab)
+            else
+                UB:SelectGuildTab(tab)
+            end
+        end)
         b:SetScript("OnEnter", function(button)
             GameTooltip:SetOwner(button, "ANCHOR_RIGHT")
             if button.isBuy then
@@ -1015,6 +1166,7 @@ function UB:CreateGuildDisplay()
                     if remainingWithdrawals and remainingWithdrawals >= 0 then
                         GameTooltip:AddLine("Withdrawals remaining: " .. remainingWithdrawals, 0.8, 0.8, 0.8)
                     end
+                    GameTooltip:AddLine("Right-click to rename/change icon", 0.6, 0.8, 1.0)
                 end
             end
             GameTooltip:Show()

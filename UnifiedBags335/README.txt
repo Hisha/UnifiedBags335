@@ -1,25 +1,41 @@
-UnifiedBags335 0.1.0
-=====================
+UnifiedBags335 0.2.2-beta1
 
-A self-contained single-window inventory and bank addon for WoW 3.3.5a.
-BankReagentsUI is optional. When present, a Reagent Storage tab is available
-while using a banker.
+Standalone single-bag UI for WoW 3.3.5.
 
-Current features
-----------------
-- One window for backpack + equipped bags.
-- One window/view for bank + purchased bank bags.
-- Automatically opens the Bank view at a banker.
-- Reagent Storage tab backed by mod-bank-reagents / BankReagentsUI.
-- Search filter for bags, bank, and reagent storage.
-- Reagent right-click: withdraw one normal item stack.
-- Reagent left-drag into the Bags view: withdraw one normal item stack.
-- Shift-left or Shift-right reagent: split/withdraw a chosen amount.
-- Account-wide SavedVariables cache and tooltip counts for characters seen by
-  this WoW account/addon installation.
+Install:
+  World of Warcraft/Interface/AddOns/UnifiedBags335/
 
-IMPORTANT
----------
-Disable Bagnon while testing UnifiedBags335. Both addons replace the same stock
-bag toggle functions and bank display behavior, so running them together is not
-supported.
+BankReagentsUI is optional for ordinary Bags/Bank/Guild Bank use, but is required
+for the Reagent Storage tab.
+
+Features:
+  * Unified character Bags window.
+  * Separate Bank window that opens alongside Bags at a banker.
+  * Reagent Storage tab in the Bank window when BankReagentsUI is present.
+  * Search for Bags, Bank, Reagent Storage, and Guild Bank.
+  * Character money display.
+  * Optional equipped-bag and bank-bag slot strips.
+  * Purchase unowned bank bag slots with the normal Blizzard confirmation.
+  * Interface Options for columns, visible rows, scale, bag-slot visibility, and
+    reagent auto-deposit.
+  * Account-wide SavedVariables inventory cache and per-character tooltip counts.
+  * Standalone Guild Bank frame with:
+      - purchased guild-bank tabs
+      - tab permissions
+      - drag/right-click transfers
+      - stack splitting
+      - guild money display
+      - deposit/withdraw controls
+      - withdraw permission handling
+      - tab purchase handling
+      - tab rename/icon editing
+
+Reagent Storage controls:
+  * Right-click: withdraw a normal stack.
+  * Left-drag: drag a virtual stack toward Bags to withdraw.
+  * Shift-click: choose an amount with the normal stack-split dialog.
+
+Notes:
+  UnifiedBags335 does not require Bagnon and does not modify Bagnon.
+  Server-side inventory, bank, guild-bank, and reagent-storage rules remain
+  authoritative.
