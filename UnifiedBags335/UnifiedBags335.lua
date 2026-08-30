@@ -448,7 +448,20 @@ function UB:GetButton(display, index)
         end
 
         if mouseButton == "RightButton" then
-            UseContainerItem(button.bag, button.slot)
+            if ContainerFrameItemButton_OnClick then
+                    -- Use Blizzard's own container click path for ordinary
+                    -- usable items (recipes, consumables, equipment, etc.).
+                    local oldID = button:GetID()
+                    local parent = button:GetParent()
+                    local oldBagID = parent.bagID
+                    button:SetID(button.slot)
+                    parent.bagID = button.bag
+                    ContainerFrameItemButton_OnClick(button, "RightButton")
+                    parent.bagID = oldBagID
+                    button:SetID(oldID)
+                else
+                    UseContainerItem(button.bag, button.slot)
+                end
         else
             PickupContainerItem(button.bag, button.slot)
         end
