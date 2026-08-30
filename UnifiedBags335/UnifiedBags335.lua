@@ -453,11 +453,17 @@ function UB:GetButton(display, index)
                     -- usable items (recipes, consumables, equipment, etc.).
                     local oldID = button:GetID()
                     local parent = button:GetParent()
-                    local oldBagID = parent.bagID
+                    local oldParentID = parent:GetID()
+
+                    -- Blizzard 3.3.5 resolves a container item as:
+                    --   bag  = button:GetParent():GetID()
+                    --   slot = button:GetID()
+                    -- Our unified buttons do not live inside one frame per bag,
+                    -- so temporarily present that exact stock identity.
                     button:SetID(button.slot)
-                    parent.bagID = button.bag
+                    parent:SetID(button.bag)
                     ContainerFrameItemButton_OnClick(button, "RightButton")
-                    parent.bagID = oldBagID
+                    parent:SetID(oldParentID)
                     button:SetID(oldID)
                 else
                     UseContainerItem(button.bag, button.slot)
