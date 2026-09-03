@@ -857,14 +857,29 @@ function UB:ApplyDisplayGeometry(display)
     local topSpace = display.hasTabs and 82 or 60
     local showSlots = ((display.key == "bags") and s.showBagSlots) or ((display.key == "bank") and s.showBankBagSlots)
     if display.key == "bank" and display.view == "reagents" then showSlots = false end
-    local bottomSpace = showSlots and 58 or 22
+    -- The Bags money display is independent of the optional equipped-bag
+    -- slot strip.  Keep a small footer reserved for gold even when that strip
+    -- is hidden; otherwise the scroll area sits over the money text.
+    local bottomSpace
+    local scrollBottom
+    if showSlots then
+        bottomSpace = 58
+        scrollBottom = 54
+    elseif display.key == "bags" then
+        bottomSpace = 40
+        scrollBottom = 36
+    else
+        bottomSpace = 22
+        scrollBottom = 18
+    end
+
     local width = contentWidth + 55
     if display.hasTabs then width = math.max(width, 575) end
     local height = topSpace + rows * (BUTTON_SIZE + BUTTON_GAP) + bottomSpace
     display.frame:SetWidth(width)
     display.frame:SetHeight(height)
     display.frame:SetScale(s.scale or 1)
-    display.scroll:SetPoint("BOTTOMRIGHT", -35, showSlots and 54 or 18)
+    display.scroll:SetPoint("BOTTOMRIGHT", -35, scrollBottom)
     display.scrollChild:SetWidth(contentWidth)
     self:RefreshBagSlots(display)
     self:UpdateMoney()
